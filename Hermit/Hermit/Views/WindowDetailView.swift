@@ -950,16 +950,32 @@ struct WindowDetailView: View {
 
             let wasAtBottom = context.coordinator.isAtBottom(textView)
             let currentOffset = textView.contentOffset
+            let previousContentHeight = textView.contentSize.height
+            let previousDisplayText = context.coordinator.displayText
+            let displayText = Self.displayText(from: snapshot)
             let contentChanged = context.coordinator.rawText != snapshot.rawText
                 || abs(context.coordinator.fontSize - fontSize) > 0.01
+            let scrollbackWasPrepended = !previousDisplayText.isEmpty
+                && displayText != previousDisplayText
+                && displayText.hasSuffix(previousDisplayText)
 
             if contentChanged {
-                textView.attributedText = Self.attributedText(from: snapshot, fontSize: fontSize)
+                textView.attributedText = Self.attributedText(from: displayText, fontSize: fontSize)
                 textView.isSelectable = true
                 context.coordinator.rawText = snapshot.rawText
+                context.coordinator.displayText = displayText
                 context.coordinator.fontSize = fontSize
+                textView.layoutIfNeeded()
 
-                if follow || wasAtBottom {
+                if follow {
+                    context.coordinator.scrollToBottom(textView)
+                } else if scrollbackWasPrepended {
+                    let heightDelta = max(0, textView.contentSize.height - previousContentHeight)
+                    context.coordinator.restore(
+                        offset: CGPoint(x: currentOffset.x, y: currentOffset.y + heightDelta),
+                        in: textView
+                    )
+                } else if wasAtBottom {
                     context.coordinator.scrollToBottom(textView)
                 } else {
                     context.coordinator.restore(offset: currentOffset, in: textView)
@@ -979,13 +995,17 @@ struct WindowDetailView: View {
             }
         }
 
-        private static func attributedText(from snapshot: TmuxPaneSnapshot, fontSize: CGFloat) -> NSAttributedString {
+        private static func displayText(from snapshot: TmuxPaneSnapshot) -> String {
             var plainText = AnsiAttributedStringParser.plainText(snapshot.rawText)
             if plainText.isEmpty, !snapshot.lines.isEmpty {
                 plainText = snapshot.lines
                     .map { String($0.text.characters) }
                     .joined(separator: "\n")
             }
+            return plainText
+        }
+
+        private static func attributedText(from plainText: String, fontSize: CGFloat) -> NSAttributedString {
             let output = NSMutableAttributedString(string: plainText)
             let baseFont = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
             let paragraphStyle = NSMutableParagraphStyle()
@@ -1022,6 +1042,7 @@ struct WindowDetailView: View {
         final class Coordinator: NSObject, UITextViewDelegate {
             var onManualScroll: () -> Void
             var rawText = ""
+            var displayText = ""
             var fontSize: CGFloat = 0
             var contentWidth: CGFloat = 0
             var scrollToken = -1
