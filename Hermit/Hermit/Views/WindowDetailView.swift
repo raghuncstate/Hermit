@@ -830,13 +830,6 @@ struct WindowDetailView: View {
             follow = false
             model.setFollow(pane.id, enabled: false)
         }
-
-        guard !scrollbackLoadedPaneIds.contains(pane.id) else { return }
-        scrollbackLoadedPaneIds.insert(pane.id)
-
-        Task { @MainActor in
-            await model.captureScrollback(pane)
-        }
     }
 
     private func adjustTerminalFont(by delta: CGFloat) {

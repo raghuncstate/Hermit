@@ -47,7 +47,7 @@ final class TmuxWorkspaceModel {
 
     private static let outputCaptureIntervalNanoseconds: UInt64 = 4_000_000
     private static let inputRefreshDelayNanoseconds: UInt64 = 4_000_000
-    private static let liveCaptureHistoryLimit = 0
+    private static let liveCaptureHistoryLimit = 240
     private static let scrollbackCaptureHistoryLimit = 3000
     private static let localEchoDuration: TimeInterval = 1.2
 
@@ -166,6 +166,9 @@ final class TmuxWorkspaceModel {
             if let activePane = panes.first(where: \.isActive) ?? panes.first {
                 await captureLive(activePane)
                 setFollow(activePane.id, enabled: true)
+                prefetchRecentScrollback(for: panes, excluding: activePane.id)
+            } else {
+                prefetchRecentScrollback(for: panes)
             }
         } catch {
             handle(error)
@@ -537,6 +540,20 @@ final class TmuxWorkspaceModel {
             }
         }
         return nil
+    }
+
+    private func prefetchRecentScrollback(for panes: [TmuxPane], excluding excludedPaneId: String? = nil) {
+        let panesToPrefetch = panes.filter { pane in
+            pane.id != excludedPaneId && snapshotsByPane[pane.id] == nil
+        }
+        guard !panesToPrefetch.isEmpty else { return }
+
+        Task { @MainActor [weak self] in
+            for pane in panesToPrefetch {
+                guard !Task.isCancelled else { return }
+                await self?.captureLive(pane)
+            }
+        }
     }
 
     private func handle(_ error: Error) {
