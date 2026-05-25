@@ -1,10 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct WindowDetailView: View {
     private enum PaneScrollAction: Equatable {
         case top
-        case pageUp
-        case pageDown
         case bottom
     }
 
@@ -25,21 +24,12 @@ struct WindowDetailView: View {
         var window: TmuxWindow
     }
 
-    private static let topAnchorID = "pane-top"
-    private static let bottomAnchorID = "pane-bottom"
     private static let liveRefreshIntervalNanoseconds: UInt64 = 4_000_000
-    private static let topLeadingAnchor = UnitPoint(x: 0, y: 0)
-    private static let bottomLeadingAnchor = UnitPoint(x: 0, y: 1)
     private static let minimumTerminalFontSize: CGFloat = 8
     private static let maximumTerminalFontSize: CGFloat = 30
     private static let defaultTerminalFontSize: CGFloat = 14
     private static let terminalHorizontalChrome: CGFloat = 18
     private static let terminalCharacterWidthRatio: CGFloat = 0.66
-    private static let paneScrollRailAutoHideNanoseconds: UInt64 = 2_500_000_000
-
-    private static func lineAnchorID(_ index: Int) -> String {
-        "pane-line-\(index)"
-    }
 
     var model: TmuxWorkspaceModel
     var session: TmuxSession
@@ -61,10 +51,8 @@ struct WindowDetailView: View {
     @State private var panePendingDelete: PaneDeleteRequest?
     @State private var windowPendingDelete: TmuxWindow?
     @State private var scrollRequest = PaneScrollRequest(action: .bottom, token: 0)
-    @State private var scrollLineIndexByPane: [String: Int] = [:]
     @State private var terminalViewportWidth: CGFloat = 0
-    @State private var showingPaneScrollRail = false
-    @State private var paneScrollRailHideTask: Task<Void, Never>?
+    @State private var scrollbackLoadedPaneIds: Set<String> = []
 
     private var allKnownWindows: [TmuxWindow] {
         let loadedWindows = model.sessions.flatMap { model.windows(for: $0) }
@@ -218,7 +206,7 @@ struct WindowDetailView: View {
 
             paneContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .gesture(
+                .simultaneousGesture(
                     MagnificationGesture()
                         .onChanged { value in
                             setTerminalFontSize(zoomBase * value)
@@ -287,6 +275,26 @@ struct WindowDetailView: View {
             }
 
             if let pane = selectedPane {
+                Button {
+                    requestPaneScroll(.top)
+                } label: {
+                    Image(systemName: "arrow.up.to.line")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .accessibilityLabel("Go to Top")
+
+                Button {
+                    requestPaneScroll(.bottom)
+                } label: {
+                    Image(systemName: "arrow.down.to.line")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .accessibilityLabel("Go to Bottom")
+
                 Menu {
                     Button {
                         Task { await model.split(pane, in: currentWindow, vertical: false) }
@@ -362,142 +370,35 @@ struct WindowDetailView: View {
     }
 
     private func paneOutputView(pane: TmuxPane, snapshot: TmuxPaneSnapshot) -> some View {
-        let lineCount = snapshot.lines.count
-
-        return GeometryReader { geometry in
+        GeometryReader { geometry in
             let displayFontSize = fontSize
             let targetColumns = terminalColumns(availableWidth: geometry.size.width, fontSize: displayFontSize)
             let targetRows = terminalRows(availableHeight: geometry.size.height, fontSize: displayFontSize)
             let lineColumns = max(targetColumns, max(pane.width, longestLineLength(in: snapshot)))
             let contentWidth = terminalContentWidth(columns: lineColumns, availableWidth: geometry.size.width, fontSize: displayFontSize)
-            let contentMinHeight = terminalContentMinHeight(availableHeight: geometry.size.height)
 
-            ZStack(alignment: .trailing) {
-                ScrollViewReader { proxy in
-                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                        LazyVStack(alignment: .leading, spacing: 2) {
-                            Color.clear
-                                .frame(height: 1)
-                                .id(Self.topAnchorID)
-
-                            ForEach(Array(snapshot.lines.enumerated()), id: \.offset) { index, line in
-                                Text(line.text)
-                                    .font(.system(size: displayFontSize, design: .monospaced))
-                                    .lineLimit(1)
-                                    .frame(width: contentWidth, alignment: .leading)
-                                    .id(Self.lineAnchorID(index))
-                            }
-
-                            Color.clear
-                                .frame(height: 1)
-                                .id(Self.bottomAnchorID)
-                        }
-                        .frame(width: contentWidth, alignment: .leading)
-                        .frame(minHeight: contentMinHeight, alignment: .topLeading)
-                        .padding(.top, 4)
-                        .padding(.bottom, 2)
-                        .padding(.leading, 6)
-                        .padding(.trailing, showingPaneScrollRail ? 58 : 8)
-                    }
-                    .textSelection(.enabled)
-                    .background(Color(uiColor: .systemBackground))
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            revealPaneScrollRail()
-                        }
-                    )
-                    .transaction { transaction in
-                        transaction.disablesAnimations = true
-                    }
-                    .onAppear {
-                        terminalViewportWidth = geometry.size.width
-                        scrollLineIndexByPane[pane.id] = max(0, lineCount - 1)
-                        scrollToBottom(proxy, lineCount: lineCount, visibleRows: targetRows)
-                    }
-                    .onChange(of: geometry.size.width) { _, newWidth in
-                        terminalViewportWidth = newWidth
-                    }
-                    .onChange(of: snapshot.rawText) { _, _ in
-                        guard follow else { return }
-                        terminalViewportWidth = geometry.size.width
-                        scrollLineIndexByPane[pane.id] = max(0, snapshot.lines.count - 1)
-                        scrollToBottom(proxy, lineCount: snapshot.lines.count, visibleRows: targetRows)
-                    }
-                    .onChange(of: scrollRequest) { _, request in
-                        handleScrollRequest(request, proxy: proxy, paneId: pane.id, lineCount: lineCount, visibleRows: targetRows)
-                    }
+            TerminalTextOutputView(
+                snapshot: snapshot,
+                fontSize: displayFontSize,
+                contentWidth: contentWidth,
+                follow: follow,
+                scrollRequest: scrollRequest,
+                onManualScroll: {
+                    prepareForManualPaneScroll(pane)
                 }
-                .task(id: "\(pane.id)-\(targetColumns)x\(targetRows)") {
-                    await model.resizeForDisplay(pane, cols: targetColumns, rows: targetRows, in: currentWindow)
-                }
-
-                if showingPaneScrollRail {
-                    paneScrollRail
-                        .padding(.trailing, 8)
-                        .padding(.vertical, 8)
-                        .transition(.opacity.combined(with: .move(edge: .trailing)))
-                } else {
-                    paneScrollRailHandle
-                        .padding(.trailing, 8)
-                        .transition(.opacity)
-                }
+            )
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+            .background(Color(uiColor: .systemBackground))
+            .onAppear {
+                terminalViewportWidth = geometry.size.width
             }
-            .animation(.easeInOut(duration: 0.16), value: showingPaneScrollRail)
+            .onChange(of: geometry.size.width) { _, newWidth in
+                terminalViewportWidth = newWidth
+            }
+            .task(id: "\(pane.id)-\(targetColumns)x\(targetRows)") {
+                await model.resizeForDisplay(pane, cols: targetColumns, rows: targetRows, in: currentWindow)
+            }
         }
-    }
-
-    private var paneScrollRail: some View {
-        VStack(spacing: 6) {
-            Button {
-                performPaneScroll(.top)
-            } label: {
-                Image(systemName: "arrow.up.to.line")
-                    .frame(width: 32, height: 30)
-            }
-            .accessibilityLabel("Scroll to Top")
-
-            Button {
-                performPaneScroll(.pageUp)
-            } label: {
-                Image(systemName: "chevron.up.2")
-                    .frame(width: 32, height: 30)
-            }
-            .accessibilityLabel("Page Up")
-
-            Button {
-                performPaneScroll(.pageDown)
-            } label: {
-                Image(systemName: "chevron.down.2")
-                    .frame(width: 32, height: 30)
-            }
-            .accessibilityLabel("Page Down")
-
-            Button {
-                performPaneScroll(.bottom)
-            } label: {
-                Image(systemName: "arrow.down.to.line")
-                    .frame(width: 32, height: 30)
-            }
-            .accessibilityLabel("Scroll to Bottom")
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle)
-        .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var paneScrollRailHandle: some View {
-        Button {
-            revealPaneScrollRail()
-        } label: {
-            Image(systemName: "arrow.up.and.down")
-                .font(.caption.weight(.semibold))
-                .frame(width: 30, height: 42)
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityLabel("Show Scroll Controls")
     }
 
     private var windowSwitcher: some View {
@@ -902,6 +803,9 @@ struct WindowDetailView: View {
         follow = action == .bottom
         if let pane = selectedPane {
             model.setFollow(pane.id, enabled: follow)
+            if action == .bottom {
+                scrollbackLoadedPaneIds.remove(pane.id)
+            }
         }
 
         if action == .bottom {
@@ -916,80 +820,22 @@ struct WindowDetailView: View {
 
         Task { @MainActor in
             await model.captureScrollback(pane)
+            scrollbackLoadedPaneIds.insert(pane.id)
             scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
         }
     }
 
-    private func performPaneScroll(_ action: PaneScrollAction) {
-        revealPaneScrollRail()
-        requestPaneScroll(action)
-    }
-
-    private func revealPaneScrollRail() {
-        showingPaneScrollRail = true
-        paneScrollRailHideTask?.cancel()
-        paneScrollRailHideTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: Self.paneScrollRailAutoHideNanoseconds)
-            showingPaneScrollRail = false
-        }
-    }
-
-    private func handleScrollRequest(
-        _ request: PaneScrollRequest,
-        proxy: ScrollViewProxy,
-        paneId: String,
-        lineCount: Int,
-        visibleRows: Int
-    ) {
-        guard lineCount > 0 else { return }
-
-        let pageStep = max(8, (selectedPane?.height ?? 24) - 2)
-        let currentIndex = min(scrollLineIndexByPane[paneId] ?? lineCount - 1, lineCount - 1)
-        let targetIndex: Int
-
-        switch request.action {
-        case .top:
-            targetIndex = 0
-        case .pageUp:
-            targetIndex = max(0, currentIndex - pageStep)
-        case .pageDown:
-            targetIndex = min(lineCount - 1, currentIndex + pageStep)
-        case .bottom:
-            targetIndex = lineCount - 1
+    private func prepareForManualPaneScroll(_ pane: TmuxPane) {
+        if follow {
+            follow = false
+            model.setFollow(pane.id, enabled: false)
         }
 
-        scrollLineIndexByPane[paneId] = targetIndex
+        guard !scrollbackLoadedPaneIds.contains(pane.id) else { return }
+        scrollbackLoadedPaneIds.insert(pane.id)
 
-        if request.action == .pageDown && targetIndex == lineCount - 1 {
-            follow = true
-            model.setFollow(paneId, enabled: true)
-        }
-
-        if targetIndex == 0 {
-            scroll(to: Self.topAnchorID, proxy: proxy, anchor: Self.topLeadingAnchor)
-        } else if targetIndex == lineCount - 1 {
-            scrollToBottom(proxy, lineCount: lineCount, visibleRows: visibleRows)
-        } else {
-            scroll(to: Self.lineAnchorID(targetIndex), proxy: proxy, anchor: Self.topLeadingAnchor)
-        }
-    }
-
-    private func scrollToBottom(_ proxy: ScrollViewProxy, lineCount: Int, visibleRows: Int) {
-        guard follow else { return }
-        if lineCount <= visibleRows {
-            scroll(to: Self.topAnchorID, proxy: proxy, anchor: Self.topLeadingAnchor)
-            return
-        }
-        scroll(to: Self.bottomAnchorID, proxy: proxy, anchor: Self.bottomLeadingAnchor)
-    }
-
-    private func scroll(to id: String, proxy: ScrollViewProxy, anchor: UnitPoint) {
-        DispatchQueue.main.async {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo(id, anchor: anchor)
-            }
+        Task { @MainActor in
+            await model.captureScrollback(pane)
         }
     }
 
@@ -1011,7 +857,9 @@ struct WindowDetailView: View {
 
         fontSize = adjustedSize
         zoomBase = adjustedSize
-        requestPaneScroll(.bottom)
+        if follow {
+            requestPaneScroll(.bottom)
+        }
     }
 
     private func terminalColumns(availableWidth: CGFloat, fontSize: CGFloat) -> Int {
@@ -1048,5 +896,193 @@ struct WindowDetailView: View {
 
     private func longestLineLength(in snapshot: TmuxPaneSnapshot) -> Int {
         snapshot.lines.map { $0.text.characters.count }.max() ?? 0
+    }
+
+    private struct TerminalTextOutputView: UIViewRepresentable {
+        var snapshot: TmuxPaneSnapshot
+        var fontSize: CGFloat
+        var contentWidth: CGFloat
+        var follow: Bool
+        var scrollRequest: PaneScrollRequest
+        var onManualScroll: () -> Void
+
+        func makeCoordinator() -> Coordinator {
+            Coordinator(onManualScroll: onManualScroll)
+        }
+
+        func makeUIView(context: Context) -> UITextView {
+            let textView = UITextView()
+            textView.delegate = context.coordinator
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.isScrollEnabled = true
+            textView.dataDetectorTypes = [.link]
+            textView.backgroundColor = .systemBackground
+            textView.textColor = .label
+            textView.tintColor = .systemBlue
+            textView.textContainerInset = UIEdgeInsets(top: 4, left: 6, bottom: 2, right: 8)
+            textView.textContainer.lineFragmentPadding = 0
+            textView.textContainer.lineBreakMode = .byClipping
+            textView.textContainer.widthTracksTextView = false
+            textView.alwaysBounceHorizontal = true
+            textView.alwaysBounceVertical = true
+            textView.showsHorizontalScrollIndicator = true
+            textView.showsVerticalScrollIndicator = true
+            textView.keyboardDismissMode = .interactive
+            textView.adjustsFontForContentSizeCategory = false
+            textView.linkTextAttributes = [
+                .foregroundColor: UIColor.systemBlue,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ]
+            return textView
+        }
+
+        func updateUIView(_ textView: UITextView, context: Context) {
+            context.coordinator.onManualScroll = onManualScroll
+            context.coordinator.isProgrammaticScroll = true
+            defer { context.coordinator.isProgrammaticScroll = false }
+
+            let clampedContentWidth = max(contentWidth, textView.bounds.width - textView.adjustedContentInset.horizontal)
+            if abs(context.coordinator.contentWidth - clampedContentWidth) > 0.5 {
+                textView.textContainer.size = CGSize(width: clampedContentWidth, height: .greatestFiniteMagnitude)
+                context.coordinator.contentWidth = clampedContentWidth
+            }
+
+            let wasAtBottom = context.coordinator.isAtBottom(textView)
+            let currentOffset = textView.contentOffset
+            let contentChanged = context.coordinator.rawText != snapshot.rawText
+                || abs(context.coordinator.fontSize - fontSize) > 0.01
+
+            if contentChanged {
+                textView.attributedText = Self.attributedText(from: snapshot, fontSize: fontSize)
+                textView.isSelectable = true
+                context.coordinator.rawText = snapshot.rawText
+                context.coordinator.fontSize = fontSize
+
+                if follow || wasAtBottom {
+                    context.coordinator.scrollToBottom(textView)
+                } else {
+                    context.coordinator.restore(offset: currentOffset, in: textView)
+                }
+            }
+
+            if context.coordinator.scrollToken != scrollRequest.token {
+                context.coordinator.scrollToken = scrollRequest.token
+                switch scrollRequest.action {
+                case .top:
+                    context.coordinator.scrollToTop(textView)
+                case .bottom:
+                    context.coordinator.scrollToBottom(textView)
+                }
+            } else if follow && contentChanged {
+                context.coordinator.scrollToBottom(textView)
+            }
+        }
+
+        private static func attributedText(from snapshot: TmuxPaneSnapshot, fontSize: CGFloat) -> NSAttributedString {
+            var plainText = AnsiAttributedStringParser.plainText(snapshot.rawText)
+            if plainText.isEmpty, !snapshot.lines.isEmpty {
+                plainText = snapshot.lines
+                    .map { String($0.text.characters) }
+                    .joined(separator: "\n")
+            }
+            let output = NSMutableAttributedString(string: plainText)
+            let baseFont = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineBreakMode = .byClipping
+            paragraphStyle.lineSpacing = 2
+
+            let fullRange = NSRange(location: 0, length: output.length)
+            output.addAttributes([
+                .font: baseFont,
+                .foregroundColor: UIColor.label,
+                .paragraphStyle: paragraphStyle,
+            ], range: fullRange)
+            addDetectedLinks(to: output)
+            return output
+        }
+
+        private static func addDetectedLinks(to text: NSMutableAttributedString) {
+            guard text.length > 0,
+                  let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+                return
+            }
+
+            let fullRange = NSRange(location: 0, length: text.length)
+            detector.enumerateMatches(in: text.string, options: [], range: fullRange) { result, _, _ in
+                guard let result, let url = result.url else { return }
+                text.addAttributes([
+                    .link: url,
+                    .foregroundColor: UIColor.systemBlue,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                ], range: result.range)
+            }
+        }
+
+        final class Coordinator: NSObject, UITextViewDelegate {
+            var onManualScroll: () -> Void
+            var rawText = ""
+            var fontSize: CGFloat = 0
+            var contentWidth: CGFloat = 0
+            var scrollToken = -1
+            var isProgrammaticScroll = false
+
+            init(onManualScroll: @escaping () -> Void) {
+                self.onManualScroll = onManualScroll
+            }
+
+            func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+                guard !isProgrammaticScroll else { return }
+                onManualScroll()
+            }
+
+            func textViewDidChangeSelection(_ textView: UITextView) {
+                guard !isProgrammaticScroll, textView.selectedRange.length > 0 else { return }
+                onManualScroll()
+            }
+
+            func isAtBottom(_ textView: UITextView) -> Bool {
+                let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
+                let bottomOffset = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
+                return textView.contentOffset.y >= bottomOffset - 8
+            }
+
+            func scrollToTop(_ textView: UITextView) {
+                DispatchQueue.main.async {
+                    let minX = -textView.adjustedContentInset.left
+                    let minY = -textView.adjustedContentInset.top
+                    textView.setContentOffset(CGPoint(x: minX, y: minY), animated: false)
+                }
+            }
+
+            func scrollToBottom(_ textView: UITextView) {
+                DispatchQueue.main.async {
+                    let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
+                    let maxY = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
+                    let minX = -textView.adjustedContentInset.left
+                    textView.setContentOffset(CGPoint(x: minX, y: maxY), animated: false)
+                }
+            }
+
+            func restore(offset: CGPoint, in textView: UITextView) {
+                DispatchQueue.main.async {
+                    let minX = -textView.adjustedContentInset.left
+                    let minY = -textView.adjustedContentInset.top
+                    let maxX = max(minX, textView.contentSize.width - textView.bounds.width + textView.adjustedContentInset.right)
+                    let maxY = max(minY, textView.contentSize.height - textView.bounds.height + textView.adjustedContentInset.bottom)
+                    let restored = CGPoint(
+                        x: min(max(offset.x, minX), maxX),
+                        y: min(max(offset.y, minY), maxY)
+                    )
+                    textView.setContentOffset(restored, animated: false)
+                }
+            }
+        }
+    }
+}
+
+private extension UIEdgeInsets {
+    var horizontal: CGFloat {
+        left + right
     }
 }
