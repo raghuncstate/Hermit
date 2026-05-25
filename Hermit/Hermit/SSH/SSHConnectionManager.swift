@@ -30,7 +30,7 @@ final class SSHConnectionManager {
 
         do {
             logger.info("Connecting to \(host.hostname):\(host.port) as \(host.username)")
-            let authMethod = try buildAuthMethod(for: host)
+            let authMethod = try Self.authenticationMethod(for: host)
             logger.info("Auth method built successfully")
 
             let sshClient = try await SSHClient.connect(
@@ -129,7 +129,7 @@ final class SSHConnectionManager {
         state = .disconnected
     }
 
-    private func buildAuthMethod(for host: Host) throws -> SSHAuthenticationMethod {
+    static func authenticationMethod(for host: Host) throws -> SSHAuthenticationMethod {
         if host.privateKeyRef.isEmpty {
             throw SSHError.noKey
         }
@@ -164,7 +164,7 @@ final class SSHConnectionManager {
         return .rsa(username: host.username, privateKey: privateKey)
     }
 
-    private func parseOpenSSHEd25519(_ pemString: String) throws -> Data {
+    private static func parseOpenSSHEd25519(_ pemString: String) throws -> Data {
         // OpenSSH private key format for ed25519:
         // Strip header/footer, base64 decode, then extract the 32-byte private key
         let lines = pemString.components(separatedBy: "\n")

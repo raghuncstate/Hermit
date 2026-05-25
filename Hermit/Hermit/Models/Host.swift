@@ -7,6 +7,7 @@ struct Host: Codable, Identifiable {
     var port: Int
     var username: String
     var privateKeyRef: String
+    var defaultTmuxSessionName: String
     var ribbonConfigs: [RibbonConfig]
     var createdAt: Date
 
@@ -22,6 +23,7 @@ struct Host: Codable, Identifiable {
         port: Int = 22,
         username: String,
         privateKeyRef: String = "",
+        defaultTmuxSessionName: String = "mobile",
         ribbonConfigs: [RibbonConfig] = RibbonConfig.presets,
         createdAt: Date = Date()
     ) {
@@ -31,12 +33,14 @@ struct Host: Codable, Identifiable {
         self.port = port
         self.username = username
         self.privateKeyRef = privateKeyRef
+        self.defaultTmuxSessionName = defaultTmuxSessionName
         self.ribbonConfigs = ribbonConfigs
         self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
         case id, displayName, hostname, port, username, privateKeyRef
+        case defaultTmuxSessionName, defaultTmuxSession
         case ribbonConfigs, ribbonConfig, createdAt
     }
 
@@ -48,6 +52,10 @@ struct Host: Codable, Identifiable {
         port = try c.decode(Int.self, forKey: .port)
         username = try c.decode(String.self, forKey: .username)
         privateKeyRef = try c.decode(String.self, forKey: .privateKeyRef)
+        defaultTmuxSessionName =
+            (try? c.decode(String.self, forKey: .defaultTmuxSessionName)) ??
+            (try? c.decode(String.self, forKey: .defaultTmuxSession)) ??
+            "mobile"
         createdAt = try c.decode(Date.self, forKey: .createdAt)
 
         // Migrate from single ribbonConfig to ribbonConfigs array
@@ -68,7 +76,18 @@ struct Host: Codable, Identifiable {
         try c.encode(port, forKey: .port)
         try c.encode(username, forKey: .username)
         try c.encode(privateKeyRef, forKey: .privateKeyRef)
+        try c.encode(defaultTmuxSessionName, forKey: .defaultTmuxSessionName)
         try c.encode(ribbonConfigs, forKey: .ribbonConfigs)
         try c.encode(createdAt, forKey: .createdAt)
+    }
+}
+
+extension Host: Hashable {
+    static func == (lhs: Host, rhs: Host) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }

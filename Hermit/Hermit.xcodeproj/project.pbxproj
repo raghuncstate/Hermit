@@ -15,7 +15,6 @@
 		BD2F5E31C88CCD88254DAE6D /* DataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B245735556D145C235EC2451 /* DataStore.swift */; };
 		8289A071E829C23F907E366D /* KeychainManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 671A41A0D0B1223FFFAE7AE1 /* KeychainManager.swift */; };
 		060D09095CE3EE208B25B4DC /* SSHConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1046FBE859BC4B08201D8384 /* SSHConnectionManager.swift */; };
-		0016776E4CC289BD6580B528 /* TerminalBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9149D119022BAB6A6418BAE8 /* TerminalBridge.swift */; };
 		C1DD16D12B91BA7FD453A7C7 /* VoiceInputCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BF68FB3F9235F3D05D9D9ED /* VoiceInputCoordinator.swift */; };
 		4A827C5B6082616D84719E1E /* SuperWhisperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCB48B1DF698E003796C384C /* SuperWhisperProvider.swift */; };
 		6B878949F84012546095F751 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2435F9E8A183D6150175307 /* SessionListView.swift */; };
@@ -26,9 +25,21 @@
 		9427E70309498CDBF08B3846 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD59E0EB71DC1D5B631D2753 /* SettingsView.swift */; };
 		A1B2C3D4E5F60718192A3B4C /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5E6F708192A3B4C5D6E7F80 /* AboutView.swift */; };
 		B2C3D4E5F607SNIPPET0001 /* SnippetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D4E5F6SNIPPET0002 /* SnippetsView.swift */; };
-		4DBAAD9EF51F20C2BEA161E5 /* terminal.html in Resources */ = {isa = PBXBuildFile; fileRef = 6CF469136B8BD7724C12D068 /* terminal.html */; };
 		B3C4D5E6F7081920CCCCDDDD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2B3C4D5E6F70819AAAABBBB /* Assets.xcassets */; };
-		C4D5E6F7A8B90000XTERMBLD /* xterm in Resources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E60000XTERMDIR /* xterm */; };
+		A10000000000000000000001 /* TmuxModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* TmuxModels.swift */; };
+		A10000000000000000000002 /* TmuxProtocolParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* TmuxProtocolParser.swift */; };
+		A10000000000000000000003 /* TmuxControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* TmuxControlClient.swift */; };
+		A10000000000000000000004 /* TmuxCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* TmuxCommands.swift */; };
+		A10000000000000000000005 /* TmuxWorkspaceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* TmuxWorkspaceModel.swift */; };
+		A10000000000000000000006 /* AnsiAttributedString.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* AnsiAttributedString.swift */; };
+		A10000000000000000000007 /* PaneLayoutParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* PaneLayoutParser.swift */; };
+		A10000000000000000000008 /* RemoteSessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* RemoteSessionListView.swift */; };
+		A10000000000000000000009 /* WindowGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* WindowGridView.swift */; };
+		A1000000000000000000000A /* WindowDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* WindowDetailView.swift */; };
+		A1000000000000000000000B /* PaneLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* PaneLayoutView.swift */; };
+		A1000000000000000000000C /* TmuxProtocolParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* TmuxProtocolParserTests.swift */; };
+		A1000000000000000000000D /* AnsiAttributedStringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* AnsiAttributedStringTests.swift */; };
+		A1000000000000000000000E /* PaneLayoutParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* PaneLayoutParserTests.swift */; };
 		9338B8421E2ADFC2C45471BD /* ModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 281571BEA9FA0A063ED80B4A /* ModelTests.swift */; };
 		DFCF0B3F36E792A3642C085B /* RibbonConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */; };
 		698EC92E23FFC9F980449B63 /* DataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B93D8483C507AE268486180F /* DataStoreTests.swift */; };
@@ -56,26 +67,37 @@
 		B245735556D145C235EC2451 /* DataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataStore.swift; sourceTree = "<group>"; };
 		671A41A0D0B1223FFFAE7AE1 /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
 		1046FBE859BC4B08201D8384 /* SSHConnectionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHConnectionManager.swift; sourceTree = "<group>"; };
-		9149D119022BAB6A6418BAE8 /* TerminalBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalBridge.swift; sourceTree = "<group>"; };
 		2BF68FB3F9235F3D05D9D9ED /* VoiceInputCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputCoordinator.swift; sourceTree = "<group>"; };
 		FCB48B1DF698E003796C384C /* SuperWhisperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuperWhisperProvider.swift; sourceTree = "<group>"; };
 		F2435F9E8A183D6150175307 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
 		8D4E3F8BA81DD11469FAE479 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		C37793D32B81DDE173E82EAD /* NewHostView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewHostView.swift; sourceTree = "<group>"; };
 		B8355DD80EFA5F9636D1EC3C /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
+		B10000000000000000000008 /* RemoteSessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionListView.swift; sourceTree = "<group>"; };
+		B10000000000000000000009 /* WindowGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGridView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000A /* WindowDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowDetailView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000B /* PaneLayoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneLayoutView.swift; sourceTree = "<group>"; };
 		9DEAE89058FED6E1760B2389 /* VoiceInputModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputModal.swift; sourceTree = "<group>"; };
 		CD59E0EB71DC1D5B631D2753 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		6CF469136B8BD7724C12D068 /* terminal.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = terminal.html; sourceTree = "<group>"; };
 		0096DDB5D5C93DB7732319BF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		281571BEA9FA0A063ED80B4A /* ModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelTests.swift; sourceTree = "<group>"; };
 		92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RibbonConfigTests.swift; sourceTree = "<group>"; };
 		B93D8483C507AE268486180F /* DataStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataStoreTests.swift; sourceTree = "<group>"; };
 		40AD2C9FD9796DDCE059852F /* URLSchemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSchemeTests.swift; sourceTree = "<group>"; };
+		B1000000000000000000000C /* TmuxProtocolParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxProtocolParserTests.swift; sourceTree = "<group>"; };
+		B1000000000000000000000D /* AnsiAttributedStringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnsiAttributedStringTests.swift; sourceTree = "<group>"; };
+		B1000000000000000000000E /* PaneLayoutParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneLayoutParserTests.swift; sourceTree = "<group>"; };
 		D5E6F708192A3B4C5D6E7F80 /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
 		E3D4E5F6SNIPPET0002 /* SnippetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnippetsView.swift; sourceTree = "<group>"; };
 		A2B3C4D5E6F70819AAAABBBB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E1F2A3B4C5D6E7F8EEEEFFFF /* Hermit.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Hermit.entitlements; sourceTree = "<group>"; };
-		F1A2B3C4D5E60000XTERMDIR /* xterm */ = {isa = PBXFileReference; lastKnownFileType = folder; path = xterm; sourceTree = "<group>"; };
+		B10000000000000000000001 /* TmuxModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* TmuxProtocolParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxProtocolParser.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* TmuxControlClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxControlClient.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* TmuxCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxCommands.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* TmuxWorkspaceModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxWorkspaceModel.swift; sourceTree = "<group>"; };
+		B10000000000000000000006 /* AnsiAttributedString.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnsiAttributedString.swift; sourceTree = "<group>"; };
+		B10000000000000000000007 /* PaneLayoutParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneLayoutParser.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -121,6 +143,8 @@
 				9CF43B31E8845D861542A38E /* Models */,
 				F26201C1E65404DE8245CC9E /* Storage */,
 				7856F3F774A086F38BD22482 /* SSH */,
+				C10000000000000000000001 /* Tmux */,
+				C10000000000000000000002 /* Rendering */,
 				D4D506C1E0D997D1DF57082B /* Voice */,
 				C454586A1F4E28C340BDC1AD /* Views */,
 				45B877375D6D6297BAAF2860 /* Resources */,
@@ -163,9 +187,29 @@
 			isa = PBXGroup;
 			children = (
 				1046FBE859BC4B08201D8384 /* SSHConnectionManager.swift */,
-				9149D119022BAB6A6418BAE8 /* TerminalBridge.swift */,
 			);
 			path = SSH;
+			sourceTree = "<group>";
+		};
+		C10000000000000000000001 /* Tmux */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000001 /* TmuxModels.swift */,
+				B10000000000000000000002 /* TmuxProtocolParser.swift */,
+				B10000000000000000000003 /* TmuxControlClient.swift */,
+				B10000000000000000000004 /* TmuxCommands.swift */,
+				B10000000000000000000005 /* TmuxWorkspaceModel.swift */,
+			);
+			path = Tmux;
+			sourceTree = "<group>";
+		};
+		C10000000000000000000002 /* Rendering */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000006 /* AnsiAttributedString.swift */,
+				B10000000000000000000007 /* PaneLayoutParser.swift */,
+			);
+			path = Rendering;
 			sourceTree = "<group>";
 		};
 		D4D506C1E0D997D1DF57082B /* Voice */ = {
@@ -184,6 +228,10 @@
 				8D4E3F8BA81DD11469FAE479 /* NewSessionView.swift */,
 				C37793D32B81DDE173E82EAD /* NewHostView.swift */,
 				B8355DD80EFA5F9636D1EC3C /* TerminalView.swift */,
+				B10000000000000000000008 /* RemoteSessionListView.swift */,
+				B10000000000000000000009 /* WindowGridView.swift */,
+				B1000000000000000000000A /* WindowDetailView.swift */,
+				B1000000000000000000000B /* PaneLayoutView.swift */,
 				9DEAE89058FED6E1760B2389 /* VoiceInputModal.swift */,
 				CD59E0EB71DC1D5B631D2753 /* SettingsView.swift */,
 				D5E6F708192A3B4C5D6E7F80 /* AboutView.swift */,
@@ -195,8 +243,6 @@
 		45B877375D6D6297BAAF2860 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				6CF469136B8BD7724C12D068 /* terminal.html */,
-				F1A2B3C4D5E60000XTERMDIR /* xterm */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -208,6 +254,9 @@
 				92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */,
 				B93D8483C507AE268486180F /* DataStoreTests.swift */,
 				40AD2C9FD9796DDCE059852F /* URLSchemeTests.swift */,
+				B1000000000000000000000C /* TmuxProtocolParserTests.swift */,
+				B1000000000000000000000D /* AnsiAttributedStringTests.swift */,
+				B1000000000000000000000E /* PaneLayoutParserTests.swift */,
 			);
 			path = HermitTests;
 			sourceTree = "<group>";
@@ -262,9 +311,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4DBAAD9EF51F20C2BEA161E5 /* terminal.html in Resources */,
 				B3C4D5E6F7081920CCCCDDDD /* Assets.xcassets in Resources */,
-				C4D5E6F7A8B90000XTERMBLD /* xterm in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -283,13 +330,23 @@
 				BD2F5E31C88CCD88254DAE6D /* DataStore.swift in Sources */,
 				8289A071E829C23F907E366D /* KeychainManager.swift in Sources */,
 				060D09095CE3EE208B25B4DC /* SSHConnectionManager.swift in Sources */,
-				0016776E4CC289BD6580B528 /* TerminalBridge.swift in Sources */,
+				A10000000000000000000001 /* TmuxModels.swift in Sources */,
+				A10000000000000000000002 /* TmuxProtocolParser.swift in Sources */,
+				A10000000000000000000003 /* TmuxControlClient.swift in Sources */,
+				A10000000000000000000004 /* TmuxCommands.swift in Sources */,
+				A10000000000000000000005 /* TmuxWorkspaceModel.swift in Sources */,
+				A10000000000000000000006 /* AnsiAttributedString.swift in Sources */,
+				A10000000000000000000007 /* PaneLayoutParser.swift in Sources */,
 				C1DD16D12B91BA7FD453A7C7 /* VoiceInputCoordinator.swift in Sources */,
 				4A827C5B6082616D84719E1E /* SuperWhisperProvider.swift in Sources */,
 				6B878949F84012546095F751 /* SessionListView.swift in Sources */,
 				23E6FFF7CBAA7AABAE61BD6D /* NewSessionView.swift in Sources */,
 				56E185D7340403E3A2698C5B /* NewHostView.swift in Sources */,
 				1A3452C0EDC26F073FA821D8 /* TerminalView.swift in Sources */,
+				A10000000000000000000008 /* RemoteSessionListView.swift in Sources */,
+				A10000000000000000000009 /* WindowGridView.swift in Sources */,
+				A1000000000000000000000A /* WindowDetailView.swift in Sources */,
+				A1000000000000000000000B /* PaneLayoutView.swift in Sources */,
 				B80371DE1CA43395E2B4C53B /* VoiceInputModal.swift in Sources */,
 				9427E70309498CDBF08B3846 /* SettingsView.swift in Sources */,
 				A1B2C3D4E5F60718192A3B4C /* AboutView.swift in Sources */,
@@ -305,6 +362,9 @@
 				DFCF0B3F36E792A3642C085B /* RibbonConfigTests.swift in Sources */,
 				698EC92E23FFC9F980449B63 /* DataStoreTests.swift in Sources */,
 				3602275B36C43BCED095D43D /* URLSchemeTests.swift in Sources */,
+				A1000000000000000000000C /* TmuxProtocolParserTests.swift in Sources */,
+				A1000000000000000000000D /* AnsiAttributedStringTests.swift in Sources */,
+				A1000000000000000000000E /* PaneLayoutParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
