@@ -1,12 +1,19 @@
 import SwiftUI
 
+private enum AppRoute: Hashable {
+    case host(UUID)
+    case shortcut(TmuxShortcut)
+}
+
 struct SessionListView: View {
     @Environment(DataStore.self) private var dataStore
+    @Environment(AppNavigator.self) private var navigator
     @State private var showingNewHost = false
     @State private var showingSettings = false
+    @State private var navigationPath: [AppRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Group {
                 if dataStore.hosts.isEmpty {
                     ContentUnavailableView(
@@ -39,6 +46,14 @@ struct SessionListView: View {
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
             }
+            .navigationDestination(for: AppRoute.self) { route in
+                routeDestination(route)
+            }
+            .onChange(of: navigator.shortcutRequest) { _, request in
+                guard let request else { return }
+                navigationPath = [.shortcut(request.shortcut)]
+                navigator.clearShortcutRequest()
+            }
         }
     }
 
@@ -64,9 +79,7 @@ struct SessionListView: View {
 
             Section("Hosts") {
                 ForEach(dataStore.hosts.sorted { $0.displayName < $1.displayName }) { host in
-                    NavigationLink {
-                        RemoteSessionListView(host: host)
-                    } label: {
+                    NavigationLink(value: AppRoute.host(host.id)) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(host.displayName)
                                 .font(.body.weight(.medium))
@@ -93,11 +106,27 @@ struct SessionListView: View {
 
     @ViewBuilder
     private func shortcutNavigationLink(_ shortcut: TmuxShortcut) -> some View {
-        if let host = dataStore.host(for: shortcut) {
-            NavigationLink {
-                TmuxShortcutDestinationView(host: host, shortcut: shortcut)
-            } label: {
+        if dataStore.host(for: shortcut) != nil {
+            NavigationLink(value: AppRoute.shortcut(shortcut)) {
                 shortcutRow(shortcut)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func routeDestination(_ route: AppRoute) -> some View {
+        switch route {
+        case .host(let hostID):
+            if let host = dataStore.hosts.first(where: { $0.id == hostID }) {
+                RemoteSessionListView(host: host)
+            } else {
+                ContentUnavailableView("Host Missing", systemImage: "server.rack")
+            }
+        case .shortcut(let shortcut):
+            if let host = dataStore.host(for: shortcut) {
+                TmuxShortcutDestinationView(host: host, shortcut: shortcut)
+            } else {
+                ContentUnavailableView("Host Missing", systemImage: "server.rack")
             }
         }
     }

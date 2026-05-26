@@ -38,6 +38,7 @@ struct WindowDetailView: View {
 
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
     @Environment(DataStore.self) private var dataStore
+    @Environment(AppNavigator.self) private var navigator
     @State private var selectedPaneId: String?
     @State private var selectedWindowId: String?
     @State private var commandText = ""
@@ -520,9 +521,10 @@ struct WindowDetailView: View {
 
     @ViewBuilder
     private func shortcutSwitcherRow(_ shortcut: TmuxShortcut) -> some View {
-        if let host = dataStore.host(for: shortcut) {
-            NavigationLink {
-                TmuxShortcutDestinationView(host: host, shortcut: shortcut)
+        if dataStore.host(for: shortcut) != nil {
+            Button {
+                showingWindowSwitcher = false
+                navigator.open(shortcut)
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: shortcut.systemImage)
@@ -550,7 +552,6 @@ struct WindowDetailView: View {
                 .frame(maxWidth: .infinity, minHeight: 42, alignment: .center)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color(uiColor: .secondarySystemBackground).opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -602,37 +603,35 @@ struct WindowDetailView: View {
                 }
                 .buttonStyle(.plain)
 
-                Button {
-                    toggleFavorite(window: tmuxWindow, session: tmuxSession)
-                } label: {
-                    Image(systemName: dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "star.fill" : "star")
-                        .frame(width: 34, height: 34, alignment: .center)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle)
-                .tint(.yellow)
-                .accessibilityLabel("Favorite Window \(tmuxWindow.name)")
+                Menu {
+                    Button {
+                        toggleFavorite(window: tmuxWindow, session: tmuxSession)
+                    } label: {
+                        Label(
+                            dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "Unfavorite" : "Favorite",
+                            systemImage: dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "star.slash" : "star"
+                        )
+                    }
 
-                Button(role: .destructive) {
-                    windowPendingDelete = tmuxWindow
+                    Button(role: .destructive) {
+                        windowPendingDelete = tmuxWindow
+                    } label: {
+                        Label("Kill Window", systemImage: "trash")
+                    }
                 } label: {
-                    Image(systemName: "trash")
+                    Image(systemName: "ellipsis.circle")
                         .frame(width: 34, height: 34, alignment: .center)
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
-                .tint(.red)
-                .accessibilityLabel("Kill Window \(tmuxWindow.name)")
+                .accessibilityLabel("Window Actions \(tmuxWindow.name)")
             }
             .task(id: tmuxWindow.id) {
                 await model.refreshPanes(for: tmuxWindow)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(
-                isCurrentWindow ? Color.accentColor.opacity(0.14) : Color(uiColor: .secondarySystemBackground).opacity(0.72),
-                in: RoundedRectangle(cornerRadius: 8)
-            )
+            .background(isCurrentWindow ? Color.accentColor.opacity(0.10) : Color.clear)
 
             if !windowPanes.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
@@ -662,35 +661,37 @@ struct WindowDetailView: View {
                             }
                             .buttonStyle(.plain)
 
-                            Button {
-                                toggleFavorite(pane: pane, in: tmuxWindow, session: tmuxSession)
-                            } label: {
-                                Image(systemName: dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "star.fill" : "star")
-                                    .font(.caption)
-                                    .frame(width: 28, height: 28, alignment: .center)
-                            }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.roundedRectangle)
-                            .tint(.yellow)
-                            .accessibilityLabel("Favorite Pane \(pane.index)")
+                            Menu {
+                                Button {
+                                    toggleFavorite(pane: pane, in: tmuxWindow, session: tmuxSession)
+                                } label: {
+                                    Label(
+                                        dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "Unfavorite" : "Favorite",
+                                        systemImage: dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "star.slash" : "star"
+                                    )
+                                }
 
-                            Button(role: .destructive) {
-                                panePendingDelete = PaneDeleteRequest(pane: pane, window: tmuxWindow)
+                                Button(role: .destructive) {
+                                    panePendingDelete = PaneDeleteRequest(pane: pane, window: tmuxWindow)
+                                } label: {
+                                    Label("Kill Pane", systemImage: "trash")
+                                }
                             } label: {
-                                Image(systemName: "trash")
+                                Image(systemName: "ellipsis")
                                     .font(.caption)
                                     .frame(width: 28, height: 28, alignment: .center)
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle)
-                            .tint(.red)
-                            .accessibilityLabel("Kill Pane \(pane.index)")
+                            .accessibilityLabel("Pane Actions \(pane.index)")
                         }
                         .padding(.leading, 14)
                     }
                 }
                 .padding(.top, 2)
             }
+
+            Divider()
         }
     }
 
