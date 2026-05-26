@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LABEL="com.raghu.hermit-raghudt-tunnel"
+REMOTE_USER="${HERMIT_TUNNEL_REMOTE_USER:-raghupathyk}"
+REMOTE_HOST="${HERMIT_TUNNEL_REMOTE_HOST:-10.110.49.244}"
+REMOTE_PORT="${HERMIT_TUNNEL_REMOTE_PORT:-22}"
+REMOTE_LISTEN_HOST="${HERMIT_TUNNEL_REMOTE_LISTEN_HOST:-127.0.0.1}"
+REMOTE_LISTEN_PORT="${HERMIT_TUNNEL_REMOTE_LISTEN_PORT:-22220}"
+LOCAL_TARGET_HOST="${HERMIT_TUNNEL_LOCAL_TARGET_HOST:-127.0.0.1}"
+LOCAL_TARGET_PORT="${HERMIT_TUNNEL_LOCAL_TARGET_PORT:-22}"
+IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
+APP_DIR="$HOME/Library/Application Support/Hermit"
+LOG_DIR="$HOME/Library/Logs/Hermit"
+CONTROL_SOCKET="$APP_DIR/raghudt-tunnel.ctl"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PLIST_SOURCE="$SCRIPT_DIR/../launchd/$LABEL.plist"
+if [[ ! -f "$DEFAULT_PLIST_SOURCE" ]]; then
+  DEFAULT_PLIST_SOURCE="/Users/raghu/tmp/Hermit-tmux/launchd/$LABEL.plist"
+fi
+PLIST_SOURCE="${HERMIT_TUNNEL_PLIST_SOURCE:-$DEFAULT_PLIST_SOURCE}"
+PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
+DOMAIN="gui/$(id -u)"
+
+usage() {
+  cat <<USAGE
+Usage: hermit-raghudt-tunnel <command>
+
+Commands:
+  install       Install the user LaunchAgent
+  start         Install/load the LaunchAgent and start the tunnel now
+  stop          Stop and unload the LaunchAgent
+  restart       Stop, then start
+  status        Print human-readable status
+  quiet-status  Exit 0 only when the SSH master tunnel is connected
+  run-once      Internal launchd command; run one foreground tunnel process
+  logs          Tail the tunnel logs
+USAGE
+}
+
+ensure_dirs() {
+  mkdir -p "$APP_DIR" "$LOG_DIR" "$HOME/Library/LaunchAgents"
+  chmod 700 "$APP_DIR"
+}
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+loaded() {
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1
+}
+
+master_connected() {
+  [[ -S "$CONTROL_SOCKET" ]] || return 1
+  /usr/bin/ssh \
+    -S "$CONTROL_SOCKET" \
+    -O check \
+    -o BatchMode=yes \
+    -o LogLevel=ERROR \
+    "$REMOTE_USER@$REMOTE_HOST" >/dev/null 2>&1
+}
+
+install_agent() {
+  ensure_dirs
+  if [[ ! -f "$PLIST_SOURCE" ]]; then
+    printf 'Missing LaunchAgent source: %s\n' "$PLIST_SOURCE" >&2
+    return 1
+  fi
+  cp "$PLIST_SOURCE" "$PLIST_DEST"
+  plutil -lint "$PLIST_DEST" >/dev/null
+  chmod 644 "$PLIST_DEST"
+  printf 'Installed %s\n' "$PLIST_DEST"
+}
+
+start_agent() {
+  install_agent >/dev/null
+  if loaded; then
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+  else
+    launchctl bootstrap "$DOMAIN" "$PLIST_DEST"
+  fi
+  sleep 1
+  status
+}
+
+stop_agent() {
+  if master_connected; then
+    /usr/bin/ssh \
+      -S "$CONTROL_SOCKET" \
+      -O exit \
+      -o BatchMode=yes \
+      -o LogLevel=ERROR \
+      "$REMOTE_USER@$REMOTE_HOST" >/dev/null 2>&1 || true
+  fi
+  if loaded; then
+    launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+  fi
+  rm -f "$CONTROL_SOCKET"
+  printf 'Hermit raghudt tunnel stopped\n'
+}
+
+status() {
+  if master_connected; then
+    printf 'connected: %s:%s -> %s:%s via %s@%s\n' \
+      "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" \
+      "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" \
+      "$REMOTE_USER" "$REMOTE_HOST"
+    return 0
+  fi
+
+  if loaded; then
+    printf 'loaded but not connected; launchd will retry, or run: %s restart\n' "$0"
+    return 1
+  fi
+
+  printf 'stopped\n'
+  return 1
+}
+
+run_once() {
+  ensure_dirs
+  umask 077
+
+  if [[ ! -r "$IDENTITY_FILE" ]]; then
+    log "identity file missing or unreadable: $IDENTITY_FILE"
+    exit 78
+  fi
+
+  if master_connected; then
+    log "tunnel already connected"
+    exit 0
+  fi
+
+  rm -f "$CONTROL_SOCKET"
+
+  if ! /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
+    log "raghudt is not reachable at $REMOTE_HOST:$REMOTE_PORT; will retry later"
+    exit 75
+  fi
+
+  if ! /usr/bin/nc -G 2 -z "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" >/dev/null 2>&1; then
+    log "local SSH is not reachable at $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT"
+    exit 75
+  fi
+
+  log "starting reverse tunnel: $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT -> $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT via $REMOTE_USER@$REMOTE_HOST"
+
+  exec /usr/bin/ssh \
+    -M \
+    -S "$CONTROL_SOCKET" \
+    -N \
+    -T \
+    -i "$IDENTITY_FILE" \
+    -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=accept-new \
+    -o LogLevel=ERROR \
+    -R "$REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT:$LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT" \
+    -p "$REMOTE_PORT" \
+    "$REMOTE_USER@$REMOTE_HOST"
+}
+
+case "${1:-}" in
+  install)
+    install_agent
+    ;;
+  start)
+    start_agent
+    ;;
+  stop)
+    stop_agent
+    ;;
+  restart)
+    stop_agent >/dev/null
+    start_agent
+    ;;
+  status)
+    status
+    ;;
+  quiet-status)
+    master_connected
+    ;;
+  run-once)
+    run_once
+    ;;
+  logs)
+    ensure_dirs
+    touch "$LOG_DIR/raghudt-tunnel.log" "$LOG_DIR/raghudt-tunnel.err.log"
+    tail -f "$LOG_DIR/raghudt-tunnel.log" "$LOG_DIR/raghudt-tunnel.err.log"
+    ;;
+  *)
+    usage
+    exit 64
+    ;;
+esac

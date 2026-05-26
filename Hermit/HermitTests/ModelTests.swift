@@ -10,7 +10,12 @@ struct ModelTests {
             hostname: "192.168.1.1",
             port: 22,
             username: "dev",
-            privateKeyRef: "key-ref-123"
+            privateKeyRef: "key-ref-123",
+            jumpHost: SSHJumpHost(
+                hostname: "raghudt",
+                username: "raghupathyk",
+                privateKeyRef: "jump-key-ref"
+            )
         )
         let data = try JSONEncoder.hermit.encode(host)
         let decoded = try JSONDecoder.hermit.decode(Host.self, from: data)
@@ -19,6 +24,7 @@ struct ModelTests {
         #expect(decoded.port == host.port)
         #expect(decoded.username == host.username)
         #expect(decoded.privateKeyRef == host.privateKeyRef)
+        #expect(decoded.jumpHost == host.jumpHost)
     }
 
     @Test func sessionRoundTrip() throws {

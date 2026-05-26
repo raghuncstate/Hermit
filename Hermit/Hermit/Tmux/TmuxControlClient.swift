@@ -10,7 +10,8 @@ actor TmuxControlClient {
     nonisolated let events: AsyncStream<TmuxControlEvent>
 
     private let eventContinuation: AsyncStream<TmuxControlEvent>.Continuation
-    private let sshClient: SSHClient
+    private let connection: SSHClientConnection
+    private var sshClient: SSHClient { connection.client }
     private var writer: TTYStdinWriter?
     private var parser = TmuxProtocolParser()
     private var lifecycleTask: Task<Void, Never>?
@@ -18,23 +19,16 @@ actor TmuxControlClient {
     private var pendingCommands: [Int: CheckedContinuation<String, Error>] = [:]
     private var startContinuation: CheckedContinuation<Void, Error>?
 
-    init(sshClient: SSHClient) {
-        self.sshClient = sshClient
+    init(connection: SSHClientConnection) {
+        self.connection = connection
         let stream = AsyncStream<TmuxControlEvent>.makeStream(bufferingPolicy: .bufferingNewest(512))
         self.events = stream.stream
         self.eventContinuation = stream.continuation
     }
 
     static func connect(host: Host, sessionName: String) async throws -> TmuxControlClient {
-        let authMethod = try SSHConnectionManager.authenticationMethod(for: host)
-        let sshClient = try await SSHClient.connect(
-            host: host.hostname,
-            port: host.port,
-            authenticationMethod: authMethod,
-            hostKeyValidator: .acceptAnything(),
-            reconnect: .never
-        )
-        let client = TmuxControlClient(sshClient: sshClient)
+        let connection = try await SSHConnectionManager.connectClient(for: host)
+        let client = TmuxControlClient(connection: connection)
         try await client.start(sessionName: sessionName)
         return client
     }
@@ -103,7 +97,7 @@ actor TmuxControlClient {
     func disconnect() async {
         lifecycleTask?.cancel()
         lifecycleTask = nil
-        try? await sshClient.close()
+        await connection.close()
         finish(error: TmuxProtocolError.disconnected)
     }
 

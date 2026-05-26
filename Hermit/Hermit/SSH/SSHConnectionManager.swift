@@ -7,6 +7,16 @@ import os
 
 private let logger = Logger(subsystem: "com.zeromissionllc.hermit", category: "SSH")
 
+struct SSHClientConnection {
+    let client: SSHClient
+    let jumpClient: SSHClient?
+
+    func close() async {
+        try? await client.close()
+        try? await jumpClient?.close()
+    }
+}
+
 @Observable
 final class SSHConnectionManager {
     enum ConnectionState: Equatable {
@@ -21,7 +31,7 @@ final class SSHConnectionManager {
     var terminalCols: Int = 80
     var terminalRows: Int = 24
 
-    private var client: SSHClient?
+    private var connection: SSHClientConnection?
     private var stdinWriter: TTYStdinWriter?
     private var connectionTask: Task<Void, Never>?
 
@@ -30,17 +40,9 @@ final class SSHConnectionManager {
 
         do {
             logger.info("Connecting to \(host.hostname):\(host.port) as \(host.username)")
-            let authMethod = try Self.authenticationMethod(for: host)
-            logger.info("Auth method built successfully")
-
-            let sshClient = try await SSHClient.connect(
-                host: host.hostname,
-                port: host.port,
-                authenticationMethod: authMethod,
-                hostKeyValidator: .acceptAnything(),
-                reconnect: .never
-            )
-            self.client = sshClient
+            let connection = try await Self.connectClient(for: host)
+            let sshClient = connection.client
+            self.connection = connection
             state = .connected
 
             let command: String
@@ -123,21 +125,61 @@ final class SSHConnectionManager {
         connectionTask = nil
         stdinWriter = nil
         Task {
-            try? await client?.close()
-            client = nil
+            await connection?.close()
+            connection = nil
         }
         state = .disconnected
     }
 
+    static func connectClient(for host: Host) async throws -> SSHClientConnection {
+        let authMethod = try authenticationMethod(for: host)
+        logger.info("Auth method built successfully")
+
+        let targetSettings = SSHClientSettings(
+            host: host.hostname,
+            port: host.port,
+            authenticationMethod: { authMethod },
+            hostKeyValidator: .acceptAnything()
+        )
+
+        guard let jumpHost = host.jumpHost else {
+            let sshClient = try await SSHClient.connect(to: targetSettings)
+            return SSHClientConnection(client: sshClient, jumpClient: nil)
+        }
+
+        logger.info("Connecting through jump host \(jumpHost.hostname):\(jumpHost.port) as \(jumpHost.username)")
+        let jumpPrivateKeyRef = jumpHost.privateKeyRef.isEmpty ? host.privateKeyRef : jumpHost.privateKeyRef
+        let jumpAuthMethod = try authenticationMethod(username: jumpHost.username, privateKeyRef: jumpPrivateKeyRef)
+        let jumpSettings = SSHClientSettings(
+            host: jumpHost.hostname,
+            port: jumpHost.port,
+            authenticationMethod: { jumpAuthMethod },
+            hostKeyValidator: .acceptAnything()
+        )
+        let jumpClient = try await SSHClient.connect(to: jumpSettings)
+
+        do {
+            let targetClient = try await jumpClient.jump(to: targetSettings)
+            return SSHClientConnection(client: targetClient, jumpClient: jumpClient)
+        } catch {
+            try? await jumpClient.close()
+            throw error
+        }
+    }
+
     static func authenticationMethod(for host: Host) throws -> SSHAuthenticationMethod {
-        if host.privateKeyRef.isEmpty {
+        try authenticationMethod(username: host.username, privateKeyRef: host.privateKeyRef)
+    }
+
+    static func authenticationMethod(username: String, privateKeyRef: String) throws -> SSHAuthenticationMethod {
+        if privateKeyRef.isEmpty {
             throw SSHError.noKey
         }
 
         // Try Keychain first, fall back to dev key file in Documents
         let keyData: Data
         do {
-            keyData = try KeychainManager.load(key: host.privateKeyRef)
+            keyData = try KeychainManager.load(key: privateKeyRef)
         } catch {
             // Dev fallback: check for key file in app Documents
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -156,12 +198,12 @@ final class SSHConnectionManager {
         if keyString.contains("OPENSSH") {
             let rawKey = try parseOpenSSHEd25519(keyString)
             let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: rawKey)
-            return .ed25519(username: host.username, privateKey: privateKey)
+            return .ed25519(username: username, privateKey: privateKey)
         }
 
         // Fall back to RSA
         let privateKey = try Insecure.RSA.PrivateKey(sshRsa: keyString)
-        return .rsa(username: host.username, privateKey: privateKey)
+        return .rsa(username: username, privateKey: privateKey)
     }
 
     private static func parseOpenSSHEd25519(_ pemString: String) throws -> Data {

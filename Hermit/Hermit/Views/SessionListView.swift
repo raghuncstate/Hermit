@@ -83,7 +83,7 @@ struct SessionListView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(host.displayName)
                                 .font(.body.weight(.medium))
-                            Text("\(host.username)@\(host.hostname):\(host.port)")
+                            Text(hostConnectionSummary(host))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Text("mobile session: \(host.defaultTmuxSessionName)")
@@ -162,6 +162,12 @@ struct SessionListView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func hostConnectionSummary(_ host: Host) -> String {
+        let target = "\(host.username)@\(host.hostname):\(host.port)"
+        guard let jumpHost = host.jumpHost else { return target }
+        return "\(target) via \(jumpHost.username)@\(jumpHost.hostname):\(jumpHost.port)"
     }
 }
 

@@ -45,6 +45,9 @@ struct NewSessionView: View {
                         LabeledContent("Hostname", value: host.hostname)
                         LabeledContent("Port", value: "\(host.port)")
                         LabeledContent("Username", value: host.username)
+                        if let jumpHost = host.jumpHost {
+                            LabeledContent("Jump Host", value: "\(jumpHost.username)@\(jumpHost.hostname):\(jumpHost.port)")
+                        }
                     }
                 }
             }

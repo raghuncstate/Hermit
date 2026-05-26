@@ -1,5 +1,24 @@
 import Foundation
 
+struct SSHJumpHost: Codable, Hashable {
+    var hostname: String
+    var port: Int
+    var username: String
+    var privateKeyRef: String
+
+    init(
+        hostname: String,
+        port: Int = 22,
+        username: String,
+        privateKeyRef: String = ""
+    ) {
+        self.hostname = hostname
+        self.port = port
+        self.username = username
+        self.privateKeyRef = privateKeyRef
+    }
+}
+
 struct Host: Codable, Identifiable {
     var id: UUID
     var displayName: String
@@ -7,6 +26,7 @@ struct Host: Codable, Identifiable {
     var port: Int
     var username: String
     var privateKeyRef: String
+    var jumpHost: SSHJumpHost?
     var defaultTmuxSessionName: String
     var ribbonConfigs: [RibbonConfig]
     var createdAt: Date
@@ -23,6 +43,7 @@ struct Host: Codable, Identifiable {
         port: Int = 22,
         username: String,
         privateKeyRef: String = "",
+        jumpHost: SSHJumpHost? = nil,
         defaultTmuxSessionName: String = "mobile",
         ribbonConfigs: [RibbonConfig] = RibbonConfig.presets,
         createdAt: Date = Date()
@@ -33,13 +54,14 @@ struct Host: Codable, Identifiable {
         self.port = port
         self.username = username
         self.privateKeyRef = privateKeyRef
+        self.jumpHost = jumpHost
         self.defaultTmuxSessionName = defaultTmuxSessionName
         self.ribbonConfigs = ribbonConfigs
         self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, displayName, hostname, port, username, privateKeyRef
+        case id, displayName, hostname, port, username, privateKeyRef, jumpHost
         case defaultTmuxSessionName, defaultTmuxSession
         case ribbonConfigs, ribbonConfig, createdAt
     }
@@ -52,6 +74,7 @@ struct Host: Codable, Identifiable {
         port = try c.decode(Int.self, forKey: .port)
         username = try c.decode(String.self, forKey: .username)
         privateKeyRef = try c.decode(String.self, forKey: .privateKeyRef)
+        jumpHost = try? c.decode(SSHJumpHost.self, forKey: .jumpHost)
         defaultTmuxSessionName =
             (try? c.decode(String.self, forKey: .defaultTmuxSessionName)) ??
             (try? c.decode(String.self, forKey: .defaultTmuxSession)) ??
@@ -76,6 +99,7 @@ struct Host: Codable, Identifiable {
         try c.encode(port, forKey: .port)
         try c.encode(username, forKey: .username)
         try c.encode(privateKeyRef, forKey: .privateKeyRef)
+        try c.encodeIfPresent(jumpHost, forKey: .jumpHost)
         try c.encode(defaultTmuxSessionName, forKey: .defaultTmuxSessionName)
         try c.encode(ribbonConfigs, forKey: .ribbonConfigs)
         try c.encode(createdAt, forKey: .createdAt)
