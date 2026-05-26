@@ -653,15 +653,13 @@ struct WindowDetailView: View {
             return
         }
 
-        requestPaneScroll(.bottom)
+        resumeFollowForInput(pane)
 
         if delta.backspaceCount > 0 {
-            model.echoBackspace(count: delta.backspaceCount, to: pane)
             Task { await model.sendBackspace(count: delta.backspaceCount, to: pane) }
         }
 
         if !delta.insertedText.isEmpty {
-            model.echoInputText(delta.insertedText, to: pane)
             Task { await model.sendInputText(delta.insertedText, to: pane) }
         }
 
@@ -678,15 +676,24 @@ struct WindowDetailView: View {
             suppressInputChange = false
         }
 
-        requestPaneScroll(.bottom)
-        model.echoEnter(to: pane)
+        resumeFollowForInput(pane)
         Task { await model.sendEnter(to: pane) }
     }
 
     private func sendCommandText(_ command: String, to pane: TmuxPane) {
-        requestPaneScroll(.bottom)
-        model.echoSubmittedCommand(command, to: pane)
+        resumeFollowForInput(pane)
         Task { await model.sendCommand(command, to: pane) }
+    }
+
+    private func resumeFollowForInput(_ pane: TmuxPane) {
+        if follow {
+            model.setFollow(pane.id, enabled: true)
+            return
+        }
+
+        follow = true
+        model.setFollow(pane.id, enabled: true)
+        requestPaneScroll(.bottom)
     }
 
     private func inputDelta(from oldValue: String, to newValue: String) -> (backspaceCount: Int, insertedText: String) {
