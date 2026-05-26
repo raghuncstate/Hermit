@@ -4,6 +4,7 @@ import Foundation
 final class DataStore {
     var hosts: [Host] = []
     var sessions: [Session] = []
+    var tmuxShortcuts: [TmuxShortcut] = []
     var iCloudAvailable: Bool { iCloudURL != nil }
 
     private let localFileURL: URL
@@ -67,6 +68,9 @@ final class DataStore {
             let backup = try JSONDecoder.hermit.decode(BackupData.self, from: data)
             self.hosts = backup.hosts.map { migrateHost($0) }
             self.sessions = backup.sessions
+            self.tmuxShortcuts = backup.tmuxShortcuts.filter { shortcut in
+                backup.hosts.contains { $0.id == shortcut.hostID }
+            }
         } catch {
             print("Failed to load data: \(error)")
         }
@@ -85,7 +89,8 @@ final class DataStore {
                 version: 1,
                 exportedAt: Date(),
                 hosts: hosts,
-                sessions: sessions
+                sessions: sessions,
+                tmuxShortcuts: tmuxShortcuts
             )
             let data = try JSONEncoder.hermit.encode(backup)
             let url = fileURL
@@ -112,6 +117,7 @@ final class DataStore {
 
     func deleteHost(_ host: Host) {
         sessions.removeAll { $0.hostID == host.id }
+        tmuxShortcuts.removeAll { $0.hostID == host.id }
         hosts.removeAll { $0.id == host.id }
         save()
     }
@@ -134,6 +140,85 @@ final class DataStore {
 
     func sessions(for host: Host) -> [Session] {
         sessions.filter { $0.hostID == host.id }
+    }
+
+    // MARK: - tmux Shortcuts
+
+    func host(for shortcut: TmuxShortcut) -> Host? {
+        hosts.first { $0.id == shortcut.hostID }
+    }
+
+    func favoriteTmuxShortcuts(limit: Int = 12) -> [TmuxShortcut] {
+        Array(
+            tmuxShortcuts
+                .filter(\.isFavorite)
+                .sorted(by: compareShortcutsByRecentUse)
+                .prefix(limit)
+        )
+    }
+
+    func frequentTmuxShortcuts(limit: Int = 8) -> [TmuxShortcut] {
+        Array(
+            tmuxShortcuts
+                .filter { !$0.isFavorite && $0.visitCount > 0 }
+                .sorted { lhs, rhs in
+                    if lhs.visitCount != rhs.visitCount {
+                        return lhs.visitCount > rhs.visitCount
+                    }
+                    return lhs.lastVisitedAt > rhs.lastVisitedAt
+                }
+                .prefix(limit)
+        )
+    }
+
+    func isFavorite(_ shortcut: TmuxShortcut) -> Bool {
+        guard let index = tmuxShortcuts.firstIndex(where: { $0.matches(shortcut) }) else {
+            return false
+        }
+        return tmuxShortcuts[index].isFavorite
+    }
+
+    func toggleFavorite(_ shortcut: TmuxShortcut) {
+        upsert(shortcut) { existing in
+            existing.isFavorite.toggle()
+            existing.lastVisitedAt = Date()
+        }
+        save()
+    }
+
+    func recordVisit(_ shortcut: TmuxShortcut) {
+        upsert(shortcut) { existing in
+            existing.visitCount += 1
+            existing.lastVisitedAt = Date()
+        }
+        pruneTmuxShortcuts()
+        save()
+    }
+
+    private func upsert(_ shortcut: TmuxShortcut, update: (inout TmuxShortcut) -> Void) {
+        var updated = shortcut
+        if let index = tmuxShortcuts.firstIndex(where: { $0.matches(shortcut) }) {
+            updated = tmuxShortcuts[index]
+            updated.updateMetadata(from: shortcut)
+            update(&updated)
+            tmuxShortcuts[index] = updated
+        } else {
+            update(&updated)
+            tmuxShortcuts.append(updated)
+        }
+    }
+
+    private func pruneTmuxShortcuts() {
+        let favoriteIDs = Set(tmuxShortcuts.filter(\.isFavorite).map(\.id))
+        let recentIDs = Set(tmuxShortcuts.sorted(by: compareShortcutsByRecentUse).prefix(40).map(\.id))
+        tmuxShortcuts.removeAll { !favoriteIDs.contains($0.id) && !recentIDs.contains($0.id) }
+    }
+
+    private func compareShortcutsByRecentUse(_ lhs: TmuxShortcut, _ rhs: TmuxShortcut) -> Bool {
+        if lhs.lastVisitedAt != rhs.lastVisitedAt {
+            return lhs.lastVisitedAt > rhs.lastVisitedAt
+        }
+        return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
     }
 
     private func migrateHost(_ host: Host) -> Host {
@@ -196,6 +281,148 @@ struct BackupData: Codable {
     var exportedAt: Date
     var hosts: [Host]
     var sessions: [Session]
+    var tmuxShortcuts: [TmuxShortcut]
+
+    init(
+        version: Int,
+        exportedAt: Date,
+        hosts: [Host],
+        sessions: [Session],
+        tmuxShortcuts: [TmuxShortcut] = []
+    ) {
+        self.version = version
+        self.exportedAt = exportedAt
+        self.hosts = hosts
+        self.sessions = sessions
+        self.tmuxShortcuts = tmuxShortcuts
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version, exportedAt, hosts, sessions, tmuxShortcuts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        exportedAt = try c.decode(Date.self, forKey: .exportedAt)
+        hosts = try c.decode([Host].self, forKey: .hosts)
+        sessions = try c.decode([Session].self, forKey: .sessions)
+        tmuxShortcuts = (try? c.decode([TmuxShortcut].self, forKey: .tmuxShortcuts)) ?? []
+    }
+}
+
+enum TmuxShortcutKind: String, Codable, Hashable {
+    case window
+    case pane
+}
+
+struct TmuxShortcut: Codable, Identifiable, Hashable {
+    var id: UUID
+    var kind: TmuxShortcutKind
+    var hostID: UUID
+    var hostDisplayName: String
+    var sessionID: String
+    var sessionName: String
+    var windowID: String
+    var windowIndex: Int
+    var windowName: String
+    var paneID: String?
+    var paneIndex: Int?
+    var paneCommand: String?
+    var isFavorite: Bool
+    var visitCount: Int
+    var lastVisitedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        kind: TmuxShortcutKind,
+        host: Host,
+        session: TmuxSession,
+        window: TmuxWindow,
+        pane: TmuxPane? = nil,
+        isFavorite: Bool = false,
+        visitCount: Int = 0,
+        lastVisitedAt: Date = Date()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.hostID = host.id
+        self.hostDisplayName = host.displayName
+        self.sessionID = session.id
+        self.sessionName = session.name
+        self.windowID = window.id
+        self.windowIndex = window.index
+        self.windowName = window.name
+        self.paneID = pane?.id
+        self.paneIndex = pane?.index
+        self.paneCommand = pane?.currentCommand
+        self.isFavorite = isFavorite
+        self.visitCount = visitCount
+        self.lastVisitedAt = lastVisitedAt
+    }
+
+    var displayTitle: String {
+        switch kind {
+        case .window:
+            return windowName
+        case .pane:
+            if let paneCommand, !paneCommand.isEmpty {
+                return paneCommand
+            }
+            if let paneIndex {
+                return "Pane \(paneIndex)"
+            }
+            return windowName
+        }
+    }
+
+    var displaySubtitle: String {
+        let target: String
+        switch kind {
+        case .window:
+            target = "\(sessionName) / #\(windowIndex)"
+        case .pane:
+            target = "\(sessionName) / \(windowName) / #\(paneIndex ?? 0)"
+        }
+        return "\(hostDisplayName) - \(target)"
+    }
+
+    var systemImage: String {
+        kind == .window ? "rectangle.split.3x1" : "terminal"
+    }
+
+    func matches(_ other: TmuxShortcut) -> Bool {
+        guard kind == other.kind,
+              hostID == other.hostID,
+              sessionName == other.sessionName else {
+            return false
+        }
+
+        let sameWindowID = !windowID.isEmpty && windowID == other.windowID
+        let sameWindowFallback = windowName == other.windowName && windowIndex == other.windowIndex
+        guard sameWindowID || sameWindowFallback else { return false }
+
+        switch kind {
+        case .window:
+            return true
+        case .pane:
+            let samePaneID = paneID != nil && paneID == other.paneID
+            let samePaneFallback = paneIndex != nil && paneIndex == other.paneIndex
+            return samePaneID || samePaneFallback
+        }
+    }
+
+    mutating func updateMetadata(from shortcut: TmuxShortcut) {
+        hostDisplayName = shortcut.hostDisplayName
+        sessionID = shortcut.sessionID
+        sessionName = shortcut.sessionName
+        windowID = shortcut.windowID
+        windowIndex = shortcut.windowIndex
+        windowName = shortcut.windowName
+        paneID = shortcut.paneID
+        paneIndex = shortcut.paneIndex
+        paneCommand = shortcut.paneCommand
+    }
 }
 
 extension JSONEncoder {

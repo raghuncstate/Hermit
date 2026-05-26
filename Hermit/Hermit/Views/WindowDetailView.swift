@@ -33,8 +33,11 @@ struct WindowDetailView: View {
     var model: TmuxWorkspaceModel
     var session: TmuxSession
     var window: TmuxWindow
+    var initialPaneId: String?
+    var initialPaneIndex: Int?
 
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
+    @Environment(DataStore.self) private var dataStore
     @State private var selectedPaneId: String?
     @State private var selectedWindowId: String?
     @State private var commandText = ""
@@ -115,6 +118,15 @@ struct WindowDetailView: View {
             }
 
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if let pane = selectedPane {
+                    Button {
+                        toggleFavorite(pane: pane, in: currentWindow, session: currentSession)
+                    } label: {
+                        Image(systemName: dataStore.isFavorite(paneShortcut(pane, in: currentWindow, session: currentSession)) ? "star.fill" : "star")
+                    }
+                    .accessibilityLabel("Favorite Pane")
+                }
+
                 terminalFontMenu
 
                 Toggle(isOn: $follow) {
@@ -134,7 +146,13 @@ struct WindowDetailView: View {
         .task(id: currentWindow.id) {
             selectedWindowId = currentWindow.id
             await model.loadWindow(currentWindow)
-            selectedPaneId = model.activePane(for: currentWindow)?.id
+            let loadedPanes = model.panes(for: currentWindow)
+            let preferredPane = preferredInitialPane(in: loadedPanes) ?? model.activePane(for: currentWindow)
+            selectedPaneId = preferredPane?.id
+            recordVisit(window: currentWindow, session: currentSession)
+            if let preferredPane {
+                recordVisit(pane: preferredPane, in: currentWindow, session: currentSession)
+            }
             if let selectedPaneId {
                 model.setFollow(selectedPaneId, enabled: follow)
             }
@@ -325,6 +343,7 @@ struct WindowDetailView: View {
         return Button {
             selectedPaneId = pane.id
             model.setFollow(pane.id, enabled: follow)
+            recordVisit(pane: pane, in: currentWindow, session: currentSession)
             Task { await model.select(pane, in: currentWindow) }
         } label: {
             HStack(spacing: 4) {
@@ -434,6 +453,7 @@ struct WindowDetailView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    shortcutSwitcherSections
                     windowSwitcherList
                 }
                 .padding(8)
@@ -464,6 +484,76 @@ struct WindowDetailView: View {
             ForEach(model.windows(for: currentSession)) { tmuxWindow in
                 windowSwitcherSection(for: tmuxWindow, in: currentSession)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var shortcutSwitcherSections: some View {
+        let favorites = dataStore.favoriteTmuxShortcuts(limit: 6)
+        if !favorites.isEmpty {
+            shortcutHeader("Favorites")
+            ForEach(favorites) { shortcut in
+                shortcutSwitcherRow(shortcut)
+            }
+            Divider()
+                .padding(.vertical, 4)
+        }
+
+        let frequent = dataStore.frequentTmuxShortcuts(limit: 6)
+        if !frequent.isEmpty {
+            shortcutHeader("Frequent")
+            ForEach(frequent) { shortcut in
+                shortcutSwitcherRow(shortcut)
+            }
+            Divider()
+                .padding(.vertical, 4)
+        }
+    }
+
+    private func shortcutHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            .padding(.top, 6)
+    }
+
+    @ViewBuilder
+    private func shortcutSwitcherRow(_ shortcut: TmuxShortcut) -> some View {
+        if let host = dataStore.host(for: shortcut) {
+            NavigationLink {
+                TmuxShortcutDestinationView(host: host, shortcut: shortcut)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: shortcut.systemImage)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, alignment: .center)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(shortcut.displayTitle)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                        Text(shortcut.displaySubtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    if shortcut.isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 42, alignment: .center)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(uiColor: .secondarySystemBackground).opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -511,6 +601,17 @@ struct WindowDetailView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    toggleFavorite(window: tmuxWindow, session: tmuxSession)
+                } label: {
+                    Image(systemName: dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "star.fill" : "star")
+                        .frame(width: 34, height: 34, alignment: .center)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .tint(.yellow)
+                .accessibilityLabel("Favorite Window \(tmuxWindow.name)")
 
                 Button(role: .destructive) {
                     windowPendingDelete = tmuxWindow
@@ -560,6 +661,18 @@ struct WindowDetailView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+
+                            Button {
+                                toggleFavorite(pane: pane, in: tmuxWindow, session: tmuxSession)
+                            } label: {
+                                Image(systemName: dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "star.fill" : "star")
+                                    .font(.caption)
+                                    .frame(width: 28, height: 28, alignment: .center)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle)
+                            .tint(.yellow)
+                            .accessibilityLabel("Favorite Pane \(pane.index)")
 
                             Button(role: .destructive) {
                                 panePendingDelete = PaneDeleteRequest(pane: pane, window: tmuxWindow)
@@ -737,6 +850,7 @@ struct WindowDetailView: View {
         selectedPaneId = nil
         follow = true
         showingWindowSwitcher = false
+        recordVisit(window: tmuxWindow, session: targetSession)
 
         Task { @MainActor in
             await model.selectWindow(tmuxWindow, in: targetSession)
@@ -745,6 +859,9 @@ struct WindowDetailView: View {
             selectedPaneId = model.activePane(for: loadedWindow)?.id
             if let selectedPaneId {
                 model.setFollow(selectedPaneId, enabled: true)
+                if let pane = model.panes(for: loadedWindow).first(where: { $0.id == selectedPaneId }) {
+                    recordVisit(pane: pane, in: loadedWindow, session: targetSession)
+                }
             }
             scrollRequest = PaneScrollRequest(action: .bottom, token: scrollRequest.token + 1)
         }
@@ -756,6 +873,8 @@ struct WindowDetailView: View {
         selectedPaneId = pane.id
         follow = true
         showingWindowSwitcher = false
+        recordVisit(window: tmuxWindow, session: targetSession)
+        recordVisit(pane: pane, in: tmuxWindow, session: targetSession)
 
         Task { @MainActor in
             await model.selectWindow(tmuxWindow, in: targetSession)
@@ -809,6 +928,55 @@ struct WindowDetailView: View {
 
     private func session(for tmuxWindow: TmuxWindow) -> TmuxSession {
         model.sessions.first { $0.id == tmuxWindow.sessionId } ?? session
+    }
+
+    private func preferredInitialPane(in panes: [TmuxPane]) -> TmuxPane? {
+        if let initialPaneId,
+           let pane = panes.first(where: { $0.id == initialPaneId }) {
+            return pane
+        }
+
+        if let initialPaneIndex,
+           let pane = panes.first(where: { $0.index == initialPaneIndex }) {
+            return pane
+        }
+
+        return nil
+    }
+
+    private func windowShortcut(_ tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) -> TmuxShortcut {
+        TmuxShortcut(
+            kind: .window,
+            host: model.host,
+            session: tmuxSession,
+            window: tmuxWindow
+        )
+    }
+
+    private func paneShortcut(_ pane: TmuxPane, in tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) -> TmuxShortcut {
+        TmuxShortcut(
+            kind: .pane,
+            host: model.host,
+            session: tmuxSession,
+            window: tmuxWindow,
+            pane: pane
+        )
+    }
+
+    private func recordVisit(window tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) {
+        dataStore.recordVisit(windowShortcut(tmuxWindow, session: tmuxSession))
+    }
+
+    private func recordVisit(pane: TmuxPane, in tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) {
+        dataStore.recordVisit(paneShortcut(pane, in: tmuxWindow, session: tmuxSession))
+    }
+
+    private func toggleFavorite(window tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) {
+        dataStore.toggleFavorite(windowShortcut(tmuxWindow, session: tmuxSession))
+    }
+
+    private func toggleFavorite(pane: TmuxPane, in tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession) {
+        dataStore.toggleFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession))
     }
 
     private func refreshWindowSwitcher() {

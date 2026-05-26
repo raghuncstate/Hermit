@@ -4,6 +4,7 @@ struct WindowGridView: View {
     var model: TmuxWorkspaceModel
     var session: TmuxSession
 
+    @Environment(DataStore.self) private var dataStore
     @State private var renamingWindow: TmuxWindow?
     @State private var renameText = ""
     @State private var windowPendingDelete: TmuxWindow?
@@ -24,19 +25,40 @@ struct WindowGridView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Button(role: .destructive) {
-                            windowPendingDelete = window
-                        } label: {
-                            Image(systemName: "trash")
-                                .frame(width: 32, height: 32, alignment: .center)
+                        HStack(spacing: 6) {
+                            Button {
+                                toggleFavorite(window)
+                            } label: {
+                                Image(systemName: dataStore.isFavorite(shortcut(for: window)) ? "star.fill" : "star")
+                                    .frame(width: 32, height: 32, alignment: .center)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle)
+                            .tint(.yellow)
+                            .accessibilityLabel("Favorite Window \(window.name)")
+
+                            Button(role: .destructive) {
+                                windowPendingDelete = window
+                            } label: {
+                                Image(systemName: "trash")
+                                    .frame(width: 32, height: 32, alignment: .center)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle)
+                            .tint(.red)
+                            .accessibilityLabel("Kill Window \(window.name)")
                         }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.roundedRectangle)
-                        .tint(.red)
                         .padding(8)
-                        .accessibilityLabel("Kill Window \(window.name)")
                     }
                     .contextMenu {
+                        Button {
+                            toggleFavorite(window)
+                        } label: {
+                            Label(
+                                dataStore.isFavorite(shortcut(for: window)) ? "Unfavorite" : "Favorite",
+                                systemImage: dataStore.isFavorite(shortcut(for: window)) ? "star.slash" : "star"
+                            )
+                        }
                         Button {
                             renamingWindow = window
                             renameText = window.name
@@ -118,6 +140,19 @@ struct WindowGridView: View {
         }
     }
 
+    private func shortcut(for window: TmuxWindow) -> TmuxShortcut {
+        TmuxShortcut(
+            kind: .window,
+            host: model.host,
+            session: session,
+            window: window
+        )
+    }
+
+    private func toggleFavorite(_ window: TmuxWindow) {
+        dataStore.toggleFavorite(shortcut(for: window))
+    }
+
     private func windowCell(_ window: TmuxWindow) -> some View {
         let panes = model.panes(for: window)
         let activeCommand = panes.first(where: \.isActive)?.currentCommand ?? panes.first?.currentCommand ?? "-"
@@ -131,7 +166,7 @@ struct WindowGridView: View {
                 Text(window.name)
                     .font(.headline)
                     .lineLimit(1)
-                    .padding(.trailing, 38)
+                    .padding(.trailing, 78)
                 Spacer(minLength: 0)
                 if window.isActive {
                     Circle()
