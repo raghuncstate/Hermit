@@ -6,19 +6,9 @@ final class VoiceInputCoordinator {
     var isShowingVoiceModal = false
     var transcribedText = ""
 
-    func handleVoiceButton(settings: AppSettings) {
-        switch settings.voiceProvider {
-        case .superWhisper:
-            if SuperWhisperProvider.isAvailable {
-                SuperWhisperProvider.openForTranscription()
-                return
-            }
-            // Fall through to empty modal if Super Whisper not installed
-            fallthrough
-        case .none:
-            transcribedText = ""
-            isShowingVoiceModal = true
-        }
+    func handleVoiceButton(settings _: AppSettings) {
+        transcribedText = ""
+        isShowingVoiceModal = true
     }
 
     func handleCallbackURL(_ url: URL) {

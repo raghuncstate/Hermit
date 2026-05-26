@@ -43,5 +43,9 @@
 	<array>
 		<string>superwhisper</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hermit uses the microphone to dictate terminal input before sending it to the selected tmux pane.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Hermit uses speech recognition to transcribe dictated terminal input.</string>
 </dict>
 </plist>

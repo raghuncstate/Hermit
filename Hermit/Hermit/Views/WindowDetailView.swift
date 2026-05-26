@@ -24,7 +24,6 @@ struct WindowDetailView: View {
         var window: TmuxWindow
     }
 
-    private static let liveRefreshIntervalNanoseconds: UInt64 = 4_000_000
     private static let minimumTerminalFontSize: CGFloat = 8
     private static let maximumTerminalFontSize: CGFloat = 30
     private static let defaultTerminalFontSize: CGFloat = 14
@@ -142,10 +141,7 @@ struct WindowDetailView: View {
         }
         .task(id: liveRefreshID) {
             guard follow, let pane = selectedPane else { return }
-            while !Task.isCancelled {
-                await model.captureLive(pane)
-                try? await Task.sleep(nanoseconds: Self.liveRefreshIntervalNanoseconds)
-            }
+            await model.captureLive(pane)
         }
         .sheet(isPresented: $showingVoiceModal) {
             VoiceInputModal(text: $voiceText) { finalText in
@@ -772,10 +768,23 @@ struct WindowDetailView: View {
     private func killPane(_ pane: TmuxPane, in tmuxWindow: TmuxWindow) {
         let targetSession = session(for: tmuxWindow)
         Task { @MainActor in
-            await model.kill(pane, in: tmuxWindow)
-            await model.refreshWindows(for: targetSession)
+            let windowPanes = model.panes(for: tmuxWindow)
+            if windowPanes.count <= 1 {
+                await model.killWindow(tmuxWindow, in: targetSession)
+            } else {
+                await model.kill(pane, in: tmuxWindow)
+            }
+            await model.refreshSessions()
+            if model.sessions.contains(where: { $0.id == targetSession.id }) {
+                await model.refreshWindows(for: targetSession)
+            }
             if selectedPaneId == pane.id {
                 selectedPaneId = model.activePane(for: currentWindow)?.id
+            }
+            if selectedWindowId == tmuxWindow.id,
+               !allKnownWindows.contains(where: { $0.id == tmuxWindow.id }) {
+                selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
+                selectedPaneId = nil
             }
         }
     }
@@ -784,7 +793,10 @@ struct WindowDetailView: View {
         let targetSession = session(for: tmuxWindow)
         Task { @MainActor in
             await model.killWindow(tmuxWindow, in: targetSession)
-            await model.refreshWindows(for: targetSession)
+            await model.refreshSessions()
+            if model.sessions.contains(where: { $0.id == targetSession.id }) {
+                await model.refreshWindows(for: targetSession)
+            }
             if selectedWindowId == tmuxWindow.id || currentWindow.id == tmuxWindow.id {
                 selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
                 selectedPaneId = nil
@@ -918,8 +930,10 @@ struct WindowDetailView: View {
             textView.isScrollEnabled = true
             textView.dataDetectorTypes = [.link]
             textView.backgroundColor = .systemBackground
+            textView.isOpaque = true
             textView.textColor = .label
             textView.tintColor = .systemBlue
+            textView.layer.drawsAsynchronously = true
             textView.textContainerInset = UIEdgeInsets(top: 4, left: 6, bottom: 2, right: 8)
             textView.textContainer.lineFragmentPadding = 0
             textView.textContainer.lineBreakMode = .byClipping
@@ -960,7 +974,10 @@ struct WindowDetailView: View {
                 && displayText.hasSuffix(previousDisplayText)
 
             if contentChanged {
-                textView.attributedText = Self.attributedText(from: displayText, fontSize: fontSize)
+                context.coordinator.apply(
+                    Self.attributedText(from: displayText, fontSize: fontSize),
+                    to: textView
+                )
                 textView.isSelectable = true
                 context.coordinator.rawText = snapshot.rawText
                 context.coordinator.displayText = displayText
@@ -991,8 +1008,6 @@ struct WindowDetailView: View {
                 case .bottom:
                     context.coordinator.scrollToBottom(textView)
                 }
-            } else if follow && contentChanged {
-                context.coordinator.scrollToBottom(textView)
             } else {
                 context.coordinator.updateScrollableWidth(clampedContentWidth, in: textView)
             }
@@ -1027,19 +1042,97 @@ struct WindowDetailView: View {
 
         private static func addDetectedLinks(to text: NSMutableAttributedString) {
             guard text.length > 0,
-                  let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+                  let detector = Self.linkDetector else {
                 return
             }
 
-            let fullRange = NSRange(location: 0, length: text.length)
-            detector.enumerateMatches(in: text.string, options: [], range: fullRange) { result, _, _ in
-                guard let result, let url = result.url else { return }
+            let scanText = linkScanText(from: text.string)
+            let fullRange = NSRange(location: 0, length: scanText.text.utf16.count)
+            detector.enumerateMatches(in: scanText.text, options: [], range: fullRange) { result, _, _ in
+                guard let result,
+                      result.url != nil,
+                      let originalRange = scanText.originalRange(for: result.range) else {
+                    return
+                }
                 text.addAttributes([
-                    .link: url,
+                    .link: String((text.string as NSString).substring(with: originalRange).filter { $0 != "\n" }),
                     .foregroundColor: UIColor.systemBlue,
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
-                ], range: result.range)
+                ], range: originalRange)
             }
+        }
+
+        private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
+        private struct LinkScanText {
+            var text: String
+            var originalUTF16Offsets: [Int]
+            var originalUTF16Length: Int
+
+            func originalRange(for range: NSRange) -> NSRange? {
+                guard range.location >= 0, range.length > 0 else { return nil }
+                let upperBound = range.location + range.length
+                guard range.location < originalUTF16Offsets.count,
+                      upperBound <= originalUTF16Offsets.count else {
+                    return nil
+                }
+
+                let originalStart = originalUTF16Offsets[range.location]
+                let originalEnd = upperBound < originalUTF16Offsets.count
+                    ? originalUTF16Offsets[upperBound]
+                    : originalUTF16Length
+                guard originalEnd > originalStart else { return nil }
+                return NSRange(location: originalStart, length: originalEnd - originalStart)
+            }
+        }
+
+        private static func linkScanText(from original: String) -> LinkScanText {
+            var normalized = ""
+            var originalUTF16Offsets: [Int] = []
+            var originalUTF16Offset = 0
+            var index = original.startIndex
+
+            while index < original.endIndex {
+                let character = original[index]
+                let characterString = String(character)
+
+                if character == "\n", shouldSkipSoftWrapNewline(in: original, at: index) {
+                    originalUTF16Offset += characterString.utf16.count
+                    index = original.index(after: index)
+                    continue
+                }
+
+                normalized.append(character)
+                for offset in 0..<characterString.utf16.count {
+                    originalUTF16Offsets.append(originalUTF16Offset + offset)
+                }
+                originalUTF16Offset += characterString.utf16.count
+                index = original.index(after: index)
+            }
+
+            return LinkScanText(
+                text: normalized,
+                originalUTF16Offsets: originalUTF16Offsets,
+                originalUTF16Length: originalUTF16Offset
+            )
+        }
+
+        private static func shouldSkipSoftWrapNewline(in text: String, at index: String.Index) -> Bool {
+            guard index > text.startIndex else { return false }
+            let next = text.index(after: index)
+            guard next < text.endIndex else { return false }
+
+            let previous = text.index(before: index)
+            return isURLContinuationCharacter(text[previous])
+                && isURLContinuationCharacter(text[next])
+        }
+
+        private static func isURLContinuationCharacter(_ character: Character) -> Bool {
+            let scalarView = character.unicodeScalars
+            guard scalarView.count == 1, let scalar = scalarView.first else { return false }
+            guard scalar.value >= 0x21 && scalar.value <= 0x7E else { return false }
+            guard !CharacterSet.whitespacesAndNewlines.contains(scalar) else { return false }
+            return character != "<" && character != ">" && character != "\""
         }
 
         final class Coordinator: NSObject, UITextViewDelegate {
@@ -1093,6 +1186,17 @@ struct WindowDetailView: View {
             func textViewDidChangeSelection(_ textView: UITextView) {
                 guard !isProgrammaticScroll, textView.selectedRange.length > 0 else { return }
                 onManualScroll()
+            }
+
+            func apply(_ attributedText: NSAttributedString, to textView: UITextView) {
+                let selectedRange = textView.selectedRange
+                UIView.performWithoutAnimation {
+                    textView.textStorage.setAttributedString(attributedText)
+                    if selectedRange.location <= textView.textStorage.length {
+                        let length = min(selectedRange.length, textView.textStorage.length - selectedRange.location)
+                        textView.selectedRange = NSRange(location: selectedRange.location, length: length)
+                    }
+                }
             }
 
             func isAtBottom(_ textView: UITextView) -> Bool {

@@ -45,8 +45,8 @@ final class TmuxWorkspaceModel {
         var expiresAt: Date
     }
 
-    private static let outputCaptureIntervalNanoseconds: UInt64 = 4_000_000
-    private static let inputRefreshDelayNanoseconds: UInt64 = 4_000_000
+    private static let outputCaptureIntervalNanoseconds: UInt64 = 16_000_000
+    private static let inputRefreshDelayNanoseconds: UInt64 = 16_000_000
     private static let liveCaptureHistoryLimit = 240
     private static let scrollbackCaptureHistoryLimit = 3000
     private static let localEchoDuration: TimeInterval = 1.2
@@ -63,6 +63,9 @@ final class TmuxWorkspaceModel {
     private var eventTask: Task<Void, Never>?
     private var followedPaneIds: Set<String> = []
     private var outputCaptureTasks: [String: Task<Void, Never>] = [:]
+    private var captureInFlightPaneIds: Set<String> = []
+    private var pendingCaptureHistoryLimits: [String: Int] = [:]
+    private var sparseFrameSkipCounts: [String: Int] = [:]
     private var pendingLocalEchoByPane: [String: PendingLocalEcho] = [:]
 
     init(host: Host) {
@@ -103,6 +106,9 @@ final class TmuxWorkspaceModel {
         client = nil
         outputCaptureTasks.values.forEach { $0.cancel() }
         outputCaptureTasks.removeAll()
+        captureInFlightPaneIds.removeAll()
+        pendingCaptureHistoryLimits.removeAll()
+        sparseFrameSkipCounts.removeAll()
         pendingLocalEchoByPane.removeAll()
         status = .disconnected
     }
@@ -189,15 +195,40 @@ final class TmuxWorkspaceModel {
 
     private func capture(paneId: String, historyLimit: Int) async {
         guard let client else { return }
-        do {
-            let rawText = try await client.capturePane(paneId: paneId, historyLimit: historyLimit)
-            let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
-            if snapshotsByPane[paneId]?.rawText != displayText {
-                snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: displayText)
+
+        if captureInFlightPaneIds.contains(paneId) {
+            queuePendingCapture(paneId: paneId, historyLimit: historyLimit)
+            return
+        }
+
+        captureInFlightPaneIds.insert(paneId)
+        defer { captureInFlightPaneIds.remove(paneId) }
+
+        var nextHistoryLimit: Int? = historyLimit
+        while let currentHistoryLimit = nextHistoryLimit {
+            nextHistoryLimit = nil
+
+            do {
+                let rawText = try await client.capturePane(paneId: paneId, historyLimit: currentHistoryLimit)
+                let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
+
+                if shouldAcceptCapture(displayText, paneId: paneId, historyLimit: currentHistoryLimit) {
+                    if snapshotsByPane[paneId]?.rawText != displayText {
+                        snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: displayText)
+                    }
+                } else {
+                    scheduleOutputCapture(paneId: paneId)
+                }
+
+                errorMessage = nil
+            } catch {
+                handle(error)
+                break
             }
-            errorMessage = nil
-        } catch {
-            handle(error)
+
+            if let pendingHistoryLimit = pendingCaptureHistoryLimits.removeValue(forKey: paneId) {
+                nextHistoryLimit = pendingHistoryLimit
+            }
         }
     }
 
@@ -252,6 +283,7 @@ final class TmuxWorkspaceModel {
         guard !text.isEmpty else { return }
         do {
             try await client?.sendText(text, to: pane.id, enter: false)
+            await captureAfterInput(pane)
         } catch {
             handle(error)
         }
@@ -261,6 +293,7 @@ final class TmuxWorkspaceModel {
         guard count > 0 else { return }
         do {
             try await client?.sendBackspace(count: count, to: pane.id)
+            await captureAfterInput(pane)
         } catch {
             handle(error)
         }
@@ -350,7 +383,10 @@ final class TmuxWorkspaceModel {
     func killWindow(_ window: TmuxWindow, in session: TmuxSession) async {
         do {
             try await client?.killWindow(windowId: window.id)
-            await refreshWindows(for: session)
+            await refreshSessions()
+            if sessions.contains(where: { $0.id == session.id }) {
+                await refreshWindows(for: session)
+            }
         } catch {
             handle(error)
         }
@@ -388,7 +424,10 @@ final class TmuxWorkspaceModel {
     func kill(_ pane: TmuxPane, in window: TmuxWindow) async {
         do {
             try await client?.killPane(paneId: pane.id)
-            await refreshWindow(window)
+            await refreshSessions()
+            if windowsBySession[window.sessionId]?.contains(where: { $0.id == window.id }) == true {
+                await refreshWindow(window)
+            }
         } catch {
             handle(error)
         }
@@ -486,6 +525,75 @@ final class TmuxWorkspaceModel {
     private func captureAfterInput(_ pane: TmuxPane) async {
         try? await Task.sleep(nanoseconds: Self.inputRefreshDelayNanoseconds)
         await captureLive(pane)
+    }
+
+    private func queuePendingCapture(paneId: String, historyLimit: Int) {
+        if let pendingHistoryLimit = pendingCaptureHistoryLimits[paneId] {
+            pendingCaptureHistoryLimits[paneId] = broaderHistoryLimit(pendingHistoryLimit, historyLimit)
+        } else {
+            pendingCaptureHistoryLimits[paneId] = historyLimit
+        }
+    }
+
+    private func broaderHistoryLimit(_ lhs: Int, _ rhs: Int) -> Int {
+        if lhs <= 0 || rhs <= 0 {
+            return 0
+        }
+        return max(lhs, rhs)
+    }
+
+    private func shouldAcceptCapture(_ rawText: String, paneId: String, historyLimit: Int) -> Bool {
+        guard historyLimit == Self.liveCaptureHistoryLimit,
+              followedPaneIds.contains(paneId),
+              let previousText = snapshotsByPane[paneId]?.rawText,
+              !previousText.isEmpty else {
+            sparseFrameSkipCounts[paneId] = nil
+            return true
+        }
+
+        let previousVisibleCount = visibleNonWhitespaceCount(in: previousText)
+        let visibleCount = visibleNonWhitespaceCount(in: rawText)
+        let sparseThreshold = max(20, previousVisibleCount / 4)
+        let looksLikePartialRedraw = previousVisibleCount >= 80 && visibleCount < sparseThreshold
+
+        guard looksLikePartialRedraw else {
+            sparseFrameSkipCounts[paneId] = nil
+            return true
+        }
+
+        let skippedCount = sparseFrameSkipCounts[paneId] ?? 0
+        guard skippedCount >= 2 else {
+            sparseFrameSkipCounts[paneId] = skippedCount + 1
+            return false
+        }
+
+        sparseFrameSkipCounts[paneId] = nil
+        return true
+    }
+
+    private func visibleNonWhitespaceCount(in text: String) -> Int {
+        var count = 0
+        var isInEscapeSequence = false
+
+        for scalar in text.unicodeScalars {
+            if isInEscapeSequence {
+                if scalar.value >= 0x40 && scalar.value <= 0x7E {
+                    isInEscapeSequence = false
+                }
+                continue
+            }
+
+            if scalar.value == 0x1B {
+                isInEscapeSequence = true
+                continue
+            }
+
+            if !CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                count += 1
+            }
+        }
+
+        return count
     }
 
     private func appendLocalEcho(_ text: String, paneId: String) {
