@@ -30,6 +30,7 @@ Commands:
   install       Install the user LaunchAgent
   start         Install/load the LaunchAgent and start the tunnel now
   stop          Stop and unload the LaunchAgent
+  toggle        Start when stopped, stop when connected/loaded
   restart       Stop, then start
   status        Print human-readable status
   quiet-status  Exit 0 only when the SSH master tunnel is connected
@@ -174,6 +175,13 @@ case "${1:-}" in
     ;;
   stop)
     stop_agent
+    ;;
+  toggle)
+    if loaded || master_connected; then
+      stop_agent
+    else
+      start_agent
+    fi
     ;;
   restart)
     stop_agent >/dev/null
