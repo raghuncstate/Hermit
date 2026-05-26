@@ -19,9 +19,49 @@ struct WindowDetailView: View {
         var token: Int
     }
 
-    private struct PaneDeleteRequest {
-        var pane: TmuxPane
-        var window: TmuxWindow
+    private struct KillRequest: Identifiable {
+        enum Target {
+            case pane(TmuxPane, TmuxWindow)
+            case window(TmuxWindow)
+        }
+
+        var target: Target
+
+        var id: String {
+            switch target {
+            case .pane(let pane, let window):
+                "pane-\(window.id)-\(pane.id)"
+            case .window(let window):
+                "window-\(window.id)"
+            }
+        }
+
+        var title: String {
+            switch target {
+            case .pane:
+                "Kill Pane?"
+            case .window:
+                "Kill Window?"
+            }
+        }
+
+        var destructiveLabel: String {
+            switch target {
+            case .pane:
+                "Kill Pane"
+            case .window:
+                "Kill Window"
+            }
+        }
+
+        var message: String {
+            switch target {
+            case .pane(let pane, let window):
+                "Pane #\(pane.index) in \(window.name) running \(pane.currentCommand)."
+            case .window(let window):
+                "Window #\(window.index) \(window.name)."
+            }
+        }
     }
 
     private static let minimumTerminalFontSize: CGFloat = 8
@@ -51,8 +91,7 @@ struct WindowDetailView: View {
     @State private var follow = true
     @State private var fontSize: CGFloat = 14
     @State private var zoomBase: CGFloat = 14
-    @State private var panePendingDelete: PaneDeleteRequest?
-    @State private var windowPendingDelete: TmuxWindow?
+    @State private var killRequest: KillRequest?
     @State private var scrollRequest = PaneScrollRequest(action: .bottom, token: 0)
     @State private var terminalViewportWidth: CGFloat = 0
     @State private var scrollbackLoadedPaneIds: Set<String> = []
@@ -176,41 +215,24 @@ struct WindowDetailView: View {
                 voiceCoordinator.isShowingVoiceModal = false
             }
         }
-        .alert("Kill Pane?", isPresented: Binding(
-            get: { panePendingDelete != nil },
-            set: { if !$0 { panePendingDelete = nil } }
-        )) {
-            Button("Kill", role: .destructive) {
-                if let request = panePendingDelete {
-                    killPane(request.pane, in: request.window)
-                }
-                panePendingDelete = nil
+        .confirmationDialog(
+            killRequest?.title ?? "Kill tmux Item?",
+            isPresented: Binding(
+                get: { killRequest != nil },
+                set: { if !$0 { killRequest = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: killRequest
+        ) { request in
+            Button(request.destructiveLabel, role: .destructive) {
+                performKill(request)
+                killRequest = nil
             }
             Button("Cancel", role: .cancel) {
-                panePendingDelete = nil
+                killRequest = nil
             }
-        } message: {
-            if let request = panePendingDelete {
-                Text(request.pane.id)
-            }
-        }
-        .alert("Kill Window?", isPresented: Binding(
-            get: { windowPendingDelete != nil },
-            set: { if !$0 { windowPendingDelete = nil } }
-        )) {
-            Button("Kill", role: .destructive) {
-                if let window = windowPendingDelete {
-                    killWindow(window)
-                }
-                windowPendingDelete = nil
-            }
-            Button("Cancel", role: .cancel) {
-                windowPendingDelete = nil
-            }
-        } message: {
-            if let window = windowPendingDelete {
-                Text(window.name)
-            }
+        } message: { request in
+            Text(request.message)
         }
     }
 
@@ -310,6 +332,17 @@ struct WindowDetailView: View {
                 .buttonBorderShape(.roundedRectangle)
                 .accessibilityLabel("Go to Bottom")
 
+                Button(role: .destructive) {
+                    killRequest = KillRequest(target: .pane(pane, currentWindow))
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .tint(.red)
+                .accessibilityLabel("Kill Selected Pane")
+
                 Menu {
                     Button {
                         Task { await model.split(pane, in: currentWindow, vertical: false) }
@@ -322,7 +355,7 @@ struct WindowDetailView: View {
                         Label("Split Vertical", systemImage: "rectangle.split.1x2")
                     }
                     Button(role: .destructive) {
-                        panePendingDelete = PaneDeleteRequest(pane: pane, window: currentWindow)
+                        killRequest = KillRequest(target: .pane(pane, currentWindow))
                     } label: {
                         Label("Kill Pane", systemImage: "trash")
                     }
@@ -614,7 +647,7 @@ struct WindowDetailView: View {
                     }
 
                     Button(role: .destructive) {
-                        windowPendingDelete = tmuxWindow
+                        killRequest = KillRequest(target: .window(tmuxWindow))
                     } label: {
                         Label("Kill Window", systemImage: "trash")
                     }
@@ -625,6 +658,17 @@ struct WindowDetailView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
                 .accessibilityLabel("Window Actions \(tmuxWindow.name)")
+
+                Button(role: .destructive) {
+                    killRequest = KillRequest(target: .window(tmuxWindow))
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 34, height: 34, alignment: .center)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .tint(.red)
+                .accessibilityLabel("Kill Window \(tmuxWindow.name)")
             }
             .task(id: tmuxWindow.id) {
                 await model.refreshPanes(for: tmuxWindow)
@@ -672,7 +716,7 @@ struct WindowDetailView: View {
                                 }
 
                                 Button(role: .destructive) {
-                                    panePendingDelete = PaneDeleteRequest(pane: pane, window: tmuxWindow)
+                                    killRequest = KillRequest(target: .pane(pane, tmuxWindow))
                                 } label: {
                                     Label("Kill Pane", systemImage: "trash")
                                 }
@@ -684,6 +728,18 @@ struct WindowDetailView: View {
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle)
                             .accessibilityLabel("Pane Actions \(pane.index)")
+
+                            Button(role: .destructive) {
+                                killRequest = KillRequest(target: .pane(pane, tmuxWindow))
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                                    .frame(width: 28, height: 28, alignment: .center)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle)
+                            .tint(.red)
+                            .accessibilityLabel("Kill Pane \(pane.index)")
                         }
                         .padding(.leading, 14)
                     }
@@ -924,6 +980,15 @@ struct WindowDetailView: View {
                 selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
                 selectedPaneId = nil
             }
+        }
+    }
+
+    private func performKill(_ request: KillRequest) {
+        switch request.target {
+        case .pane(let pane, let window):
+            killPane(pane, in: window)
+        case .window(let window):
+            killWindow(window)
         }
     }
 

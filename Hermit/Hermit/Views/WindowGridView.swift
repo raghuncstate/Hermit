@@ -82,23 +82,24 @@ struct WindowGridView: View {
                 renamingWindow = nil
             }
         }
-        .alert("Kill Window?", isPresented: Binding(
-            get: { windowPendingDelete != nil },
-            set: { if !$0 { windowPendingDelete = nil } }
-        )) {
+        .confirmationDialog(
+            "Kill Window?",
+            isPresented: Binding(
+                get: { windowPendingDelete != nil },
+                set: { if !$0 { windowPendingDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: windowPendingDelete
+        ) { window in
             Button("Kill", role: .destructive) {
-                if let window = windowPendingDelete {
-                    Task { await model.killWindow(window, in: session) }
-                }
+                Task { await model.killWindow(window, in: session) }
                 windowPendingDelete = nil
             }
             Button("Cancel", role: .cancel) {
                 windowPendingDelete = nil
             }
-        } message: {
-            if let window = windowPendingDelete {
-                Text(window.name)
-            }
+        } message: { window in
+            Text("Window #\(window.index) \(window.name).")
         }
     }
 
