@@ -47,6 +47,7 @@ final class TmuxWorkspaceModel {
 
     private static let outputCaptureIntervalNanoseconds: UInt64 = 16_000_000
     private static let inputRefreshDelayNanoseconds: UInt64 = 16_000_000
+    private static let livePollIntervalNanoseconds: UInt64 = 200_000_000
     private static let liveCaptureHistoryLimit = 240
     private static let scrollbackCaptureHistoryLimit = 3000
     private static let localEchoDuration: TimeInterval = 1.2
@@ -63,6 +64,7 @@ final class TmuxWorkspaceModel {
     private var eventTask: Task<Void, Never>?
     private var followedPaneIds: Set<String> = []
     private var outputCaptureTasks: [String: Task<Void, Never>] = [:]
+    private var livePollTasks: [String: Task<Void, Never>] = [:]
     private var captureInFlightPaneIds: Set<String> = []
     private var pendingCaptureHistoryLimits: [String: Int] = [:]
     private var sparseFrameSkipCounts: [String: Int] = [:]
@@ -106,6 +108,8 @@ final class TmuxWorkspaceModel {
         client = nil
         outputCaptureTasks.values.forEach { $0.cancel() }
         outputCaptureTasks.removeAll()
+        livePollTasks.values.forEach { $0.cancel() }
+        livePollTasks.removeAll()
         captureInFlightPaneIds.removeAll()
         pendingCaptureHistoryLimits.removeAll()
         sparseFrameSkipCounts.removeAll()
@@ -186,7 +190,7 @@ final class TmuxWorkspaceModel {
     }
 
     func captureLive(_ pane: TmuxPane) async {
-        await capture(paneId: pane.id, historyLimit: Self.liveCaptureHistoryLimit)
+        await captureLive(paneId: pane.id)
     }
 
     func captureScrollback(_ pane: TmuxPane) async {
@@ -251,9 +255,15 @@ final class TmuxWorkspaceModel {
 
     func setFollow(_ paneId: String, enabled: Bool) {
         if enabled {
+            for followedPaneId in Array(followedPaneIds) where followedPaneId != paneId {
+                followedPaneIds.remove(followedPaneId)
+                stopLivePolling(paneId: followedPaneId)
+            }
             followedPaneIds.insert(paneId)
+            startLivePolling(paneId: paneId)
         } else {
             followedPaneIds.remove(paneId)
+            stopLivePolling(paneId: paneId)
         }
     }
 
@@ -495,11 +505,25 @@ final class TmuxWorkspaceModel {
             await refreshSessions()
         case .windowAdd, .windowClose, .windowRenamed, .layoutChange, .windowPaneChanged, .sessionWindowChanged:
             await refreshSessions()
-        case .sessionChanged, .paneModeChanged, .pause, .continued:
+        case .pause(let paneId):
+            do {
+                try await client?.continuePaneOutput(paneId: paneId)
+            } catch {
+                handle(error)
+            }
+            scheduleOutputCapture(paneId: paneId)
+        case .continued(let paneId):
+            scheduleOutputCapture(paneId: paneId)
+        case .sessionChanged, .paneModeChanged:
             break
         case .exit:
             status = .disconnected
             client = nil
+            outputCaptureTasks.values.forEach { $0.cancel() }
+            outputCaptureTasks.removeAll()
+            livePollTasks.values.forEach { $0.cancel() }
+            livePollTasks.removeAll()
+            followedPaneIds.removeAll()
         }
     }
 
@@ -518,13 +542,42 @@ final class TmuxWorkspaceModel {
         if let pane = pane(withId: paneId) {
             await captureLive(pane)
         } else {
-            await capture(paneId: paneId, historyLimit: Self.liveCaptureHistoryLimit)
+            await captureLive(paneId: paneId)
         }
     }
 
     private func captureAfterInput(_ pane: TmuxPane) async {
         try? await Task.sleep(nanoseconds: Self.inputRefreshDelayNanoseconds)
         await captureLive(pane)
+    }
+
+    private func captureLive(paneId: String) async {
+        await capture(paneId: paneId, historyLimit: Self.liveCaptureHistoryLimit)
+    }
+
+    private func startLivePolling(paneId: String) {
+        guard livePollTasks[paneId] == nil else { return }
+
+        livePollTasks[paneId] = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.livePollIntervalNanoseconds)
+                guard !Task.isCancelled else { return }
+                await self?.captureLiveIfFollowed(paneId: paneId)
+            }
+        }
+    }
+
+    private func stopLivePolling(paneId: String) {
+        livePollTasks[paneId]?.cancel()
+        livePollTasks[paneId] = nil
+    }
+
+    private func captureLiveIfFollowed(paneId: String) async {
+        guard followedPaneIds.contains(paneId) else {
+            stopLivePolling(paneId: paneId)
+            return
+        }
+        await captureLive(paneId: paneId)
     }
 
     private func queuePendingCapture(paneId: String, historyLimit: Int) {
