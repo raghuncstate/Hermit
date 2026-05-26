@@ -379,8 +379,11 @@ struct WindowDetailView: View {
                 contentWidth: contentWidth,
                 follow: follow,
                 scrollRequest: scrollRequest,
-                onManualScroll: {
-                    prepareForManualPaneScroll(pane)
+                onManualScrollAwayFromBottom: {
+                    pauseFollowForManualPaneScroll(pane)
+                },
+                onManualScrollToBottom: {
+                    resumeFollowForManualPaneScroll(pane)
                 }
             )
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
@@ -844,11 +847,17 @@ struct WindowDetailView: View {
         }
     }
 
-    private func prepareForManualPaneScroll(_ pane: TmuxPane) {
+    private func pauseFollowForManualPaneScroll(_ pane: TmuxPane) {
         if follow {
             follow = false
             model.setFollow(pane.id, enabled: false)
         }
+    }
+
+    private func resumeFollowForManualPaneScroll(_ pane: TmuxPane) {
+        guard !follow else { return }
+        follow = true
+        model.setFollow(pane.id, enabled: true)
     }
 
     private func adjustTerminalFont(by delta: CGFloat) {
@@ -916,10 +925,14 @@ struct WindowDetailView: View {
         var contentWidth: CGFloat
         var follow: Bool
         var scrollRequest: PaneScrollRequest
-        var onManualScroll: () -> Void
+        var onManualScrollAwayFromBottom: () -> Void
+        var onManualScrollToBottom: () -> Void
 
         func makeCoordinator() -> Coordinator {
-            Coordinator(onManualScroll: onManualScroll)
+            Coordinator(
+                onManualScrollAwayFromBottom: onManualScrollAwayFromBottom,
+                onManualScrollToBottom: onManualScrollToBottom
+            )
         }
 
         func makeUIView(context: Context) -> UITextView {
@@ -952,7 +965,8 @@ struct WindowDetailView: View {
         }
 
         func updateUIView(_ textView: UITextView, context: Context) {
-            context.coordinator.onManualScroll = onManualScroll
+            context.coordinator.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
+            context.coordinator.onManualScrollToBottom = onManualScrollToBottom
             context.coordinator.isProgrammaticScroll = true
             defer { context.coordinator.isProgrammaticScroll = false }
 
@@ -1136,7 +1150,8 @@ struct WindowDetailView: View {
         }
 
         final class Coordinator: NSObject, UITextViewDelegate {
-            var onManualScroll: () -> Void
+            var onManualScrollAwayFromBottom: () -> Void
+            var onManualScrollToBottom: () -> Void
             var rawText = ""
             var displayText = ""
             var fontSize: CGFloat = 0
@@ -1144,48 +1159,72 @@ struct WindowDetailView: View {
             var scrollToken = -1
             var isProgrammaticScroll = false
             private var dragStartOffset: CGPoint?
-            private var didHandleManualVerticalScroll = false
+            private var didHandleManualScrollAwayFromBottom = false
+            private var didHandleManualScrollToBottom = false
 
-            init(onManualScroll: @escaping () -> Void) {
-                self.onManualScroll = onManualScroll
+            init(
+                onManualScrollAwayFromBottom: @escaping () -> Void,
+                onManualScrollToBottom: @escaping () -> Void
+            ) {
+                self.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
+                self.onManualScrollToBottom = onManualScrollToBottom
             }
 
             func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll else { return }
                 dragStartOffset = scrollView.contentOffset
-                didHandleManualVerticalScroll = false
+                didHandleManualScrollAwayFromBottom = false
+                didHandleManualScrollToBottom = false
             }
 
             func scrollViewDidScroll(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll,
-                      !didHandleManualVerticalScroll,
                       let dragStartOffset else {
                     return
                 }
 
                 let deltaX = abs(scrollView.contentOffset.x - dragStartOffset.x)
-                let deltaY = abs(scrollView.contentOffset.y - dragStartOffset.y)
-                guard deltaY > 6, deltaY >= deltaX else { return }
+                let deltaY = scrollView.contentOffset.y - dragStartOffset.y
+                let verticalDelta = abs(deltaY)
+                guard verticalDelta > 8, verticalDelta >= deltaX else { return }
 
-                didHandleManualVerticalScroll = true
-                onManualScroll()
+                if isNearBottom(scrollView, tolerance: 12) {
+                    guard !didHandleManualScrollToBottom else { return }
+                    didHandleManualScrollToBottom = true
+                    onManualScrollToBottom()
+                    return
+                }
+
+                let movedTowardHistory = deltaY < -8
+                guard movedTowardHistory,
+                      !didHandleManualScrollAwayFromBottom,
+                      !isNearBottom(scrollView, tolerance: 32) else {
+                    return
+                }
+
+                didHandleManualScrollAwayFromBottom = true
+                onManualScrollAwayFromBottom()
             }
 
             func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
                 if !decelerate {
                     dragStartOffset = nil
-                    didHandleManualVerticalScroll = false
+                    didHandleManualScrollAwayFromBottom = false
+                    didHandleManualScrollToBottom = false
                 }
             }
 
             func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
                 dragStartOffset = nil
-                didHandleManualVerticalScroll = false
+                didHandleManualScrollAwayFromBottom = false
+                didHandleManualScrollToBottom = false
             }
 
             func textViewDidChangeSelection(_ textView: UITextView) {
                 guard !isProgrammaticScroll, textView.selectedRange.length > 0 else { return }
-                onManualScroll()
+                if !isNearBottom(textView, tolerance: 32) {
+                    onManualScrollAwayFromBottom()
+                }
             }
 
             func apply(_ attributedText: NSAttributedString, to textView: UITextView) {
@@ -1200,9 +1239,7 @@ struct WindowDetailView: View {
             }
 
             func isAtBottom(_ textView: UITextView) -> Bool {
-                let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
-                let bottomOffset = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
-                return textView.contentOffset.y >= bottomOffset - 8
+                isNearBottom(textView, tolerance: 8)
             }
 
             func scrollToTop(_ textView: UITextView) {
@@ -1211,9 +1248,20 @@ struct WindowDetailView: View {
             }
 
             func scrollToBottom(_ textView: UITextView) {
-                let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
-                let maxY = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
+                let maxY = bottomOffset(for: textView)
                 restore(offset: CGPoint(x: textView.contentOffset.x, y: maxY), in: textView)
+            }
+
+            private func isNearBottom(_ scrollView: UIScrollView, tolerance: CGFloat) -> Bool {
+                scrollView.contentOffset.y >= bottomOffset(for: scrollView) - tolerance
+            }
+
+            private func bottomOffset(for scrollView: UIScrollView) -> CGFloat {
+                let visibleHeight = scrollView.bounds.height - scrollView.adjustedContentInset.top - scrollView.adjustedContentInset.bottom
+                return max(
+                    -scrollView.adjustedContentInset.top,
+                    scrollView.contentSize.height - visibleHeight + scrollView.adjustedContentInset.bottom
+                )
             }
 
             func restore(offset: CGPoint, in textView: UITextView) {
