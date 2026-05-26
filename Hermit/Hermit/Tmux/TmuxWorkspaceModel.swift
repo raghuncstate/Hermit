@@ -409,10 +409,13 @@ final class TmuxWorkspaceModel {
 
     func resizeForDisplay(_ pane: TmuxPane, cols: Int, rows: Int, in window: TmuxWindow) async {
         guard let client, cols > 0, rows > 0 else { return }
-        guard abs(pane.width - cols) > 1 || abs(pane.height - rows) > 1 else { return }
+        let singlePaneWindow = panes(for: window).count <= 1
+        if singlePaneWindow {
+            guard abs(pane.width - cols) > 1 || abs(pane.height - rows) > 1 else { return }
+        }
 
         do {
-            try await client.resizePane(paneId: pane.id, cols: cols, rows: rows)
+            try await client.resizeDisplay(windowId: window.id, cols: cols, rows: rows)
             await refreshWindow(window)
             if let resizedPane = panes(for: window).first(where: { $0.id == pane.id }) {
                 await captureLive(resizedPane)

@@ -129,6 +129,12 @@ extension TmuxControlClient {
         _ = try await send("resize-pane -t \(target) -x \(cols) -y \(rows)")
     }
 
+    func resizeDisplay(windowId: String, cols: Int, rows: Int) async throws {
+        let target = TmuxCommandQuoter.quote(windowId)
+        _ = try await send("refresh-client -C \(cols)x\(rows)")
+        _ = try await send("resize-window -t \(target) -x \(cols) -y \(rows)")
+    }
+
     func sendText(_ text: String, to paneId: String, enter: Bool) async throws {
         let target = TmuxCommandQuoter.quote(paneId)
         if text.isEmpty {

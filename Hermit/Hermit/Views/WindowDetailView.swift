@@ -959,6 +959,7 @@ struct WindowDetailView: View {
                 context.coordinator.displayText = displayText
                 context.coordinator.fontSize = fontSize
                 textView.layoutIfNeeded()
+                context.coordinator.updateScrollableWidth(clampedContentWidth, in: textView)
 
                 if follow {
                     context.coordinator.scrollToBottom(textView)
@@ -985,6 +986,8 @@ struct WindowDetailView: View {
                 }
             } else if follow && contentChanged {
                 context.coordinator.scrollToBottom(textView)
+            } else {
+                context.coordinator.updateScrollableWidth(clampedContentWidth, in: textView)
             }
         }
 
@@ -1040,6 +1043,8 @@ struct WindowDetailView: View {
             var contentWidth: CGFloat = 0
             var scrollToken = -1
             var isProgrammaticScroll = false
+            private var dragStartOffset: CGPoint?
+            private var didHandleManualVerticalScroll = false
 
             init(onManualScroll: @escaping () -> Void) {
                 self.onManualScroll = onManualScroll
@@ -1047,7 +1052,35 @@ struct WindowDetailView: View {
 
             func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll else { return }
+                dragStartOffset = scrollView.contentOffset
+                didHandleManualVerticalScroll = false
+            }
+
+            func scrollViewDidScroll(_ scrollView: UIScrollView) {
+                guard !isProgrammaticScroll,
+                      !didHandleManualVerticalScroll,
+                      let dragStartOffset else {
+                    return
+                }
+
+                let deltaX = abs(scrollView.contentOffset.x - dragStartOffset.x)
+                let deltaY = abs(scrollView.contentOffset.y - dragStartOffset.y)
+                guard deltaY > 6, deltaY >= deltaX else { return }
+
+                didHandleManualVerticalScroll = true
                 onManualScroll()
+            }
+
+            func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+                if !decelerate {
+                    dragStartOffset = nil
+                    didHandleManualVerticalScroll = false
+                }
+            }
+
+            func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+                dragStartOffset = nil
+                didHandleManualVerticalScroll = false
             }
 
             func textViewDidChangeSelection(_ textView: UITextView) {
@@ -1062,34 +1095,35 @@ struct WindowDetailView: View {
             }
 
             func scrollToTop(_ textView: UITextView) {
-                DispatchQueue.main.async {
-                    let minX = -textView.adjustedContentInset.left
-                    let minY = -textView.adjustedContentInset.top
-                    textView.setContentOffset(CGPoint(x: minX, y: minY), animated: false)
-                }
+                let minY = -textView.adjustedContentInset.top
+                restore(offset: CGPoint(x: textView.contentOffset.x, y: minY), in: textView)
             }
 
             func scrollToBottom(_ textView: UITextView) {
-                DispatchQueue.main.async {
-                    let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
-                    let maxY = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
-                    let minX = -textView.adjustedContentInset.left
-                    textView.setContentOffset(CGPoint(x: minX, y: maxY), animated: false)
-                }
+                let visibleHeight = textView.bounds.height - textView.adjustedContentInset.top - textView.adjustedContentInset.bottom
+                let maxY = max(-textView.adjustedContentInset.top, textView.contentSize.height - visibleHeight + textView.adjustedContentInset.bottom)
+                restore(offset: CGPoint(x: textView.contentOffset.x, y: maxY), in: textView)
             }
 
             func restore(offset: CGPoint, in textView: UITextView) {
-                DispatchQueue.main.async {
-                    let minX = -textView.adjustedContentInset.left
-                    let minY = -textView.adjustedContentInset.top
-                    let maxX = max(minX, textView.contentSize.width - textView.bounds.width + textView.adjustedContentInset.right)
-                    let maxY = max(minY, textView.contentSize.height - textView.bounds.height + textView.adjustedContentInset.bottom)
-                    let restored = CGPoint(
-                        x: min(max(offset.x, minX), maxX),
-                        y: min(max(offset.y, minY), maxY)
-                    )
+                let minX = -textView.adjustedContentInset.left
+                let minY = -textView.adjustedContentInset.top
+                let maxX = max(minX, textView.contentSize.width - textView.bounds.width + textView.adjustedContentInset.right)
+                let maxY = max(minY, textView.contentSize.height - textView.bounds.height + textView.adjustedContentInset.bottom)
+                let restored = CGPoint(
+                    x: min(max(offset.x, minX), maxX),
+                    y: min(max(offset.y, minY), maxY)
+                )
+
+                UIView.performWithoutAnimation {
                     textView.setContentOffset(restored, animated: false)
                 }
+            }
+
+            func updateScrollableWidth(_ width: CGFloat, in textView: UITextView) {
+                let desiredWidth = width + textView.textContainerInset.left + textView.textContainerInset.right
+                guard textView.contentSize.width < desiredWidth - 0.5 else { return }
+                textView.contentSize = CGSize(width: desiredWidth, height: textView.contentSize.height)
             }
         }
     }
