@@ -11,6 +11,9 @@ final class DataStore {
     private let iCloudURL: URL?
     private var metadataQuery: NSMetadataQuery?
 
+    private static let reverseTunnelMacHostID = UUID(uuidString: "EED9DA12-53C1-489C-B761-3013BDD43355")!
+    private static let obsoleteVPNMacHostID = UUID(uuidString: "83540C4C-2633-4C44-936C-EED9AE6F7EDB")!
+
     private var fileURL: URL {
         iCloudURL ?? localFileURL
     }
@@ -66,10 +69,21 @@ final class DataStore {
             guard let data else { return }
 
             let backup = try JSONDecoder.hermit.decode(BackupData.self, from: data)
-            self.hosts = backup.hosts.map { migrateHost($0) }
-            self.sessions = backup.sessions
-            self.tmuxShortcuts = backup.tmuxShortcuts.filter { shortcut in
-                backup.hosts.contains { $0.id == shortcut.hostID }
+            let profileMigration = migrateReverseTunnelProfile(
+                hosts: backup.hosts.map { migrateHost($0) },
+                sessions: backup.sessions,
+                shortcuts: backup.tmuxShortcuts
+            )
+            let knownHostIDs = Set(profileMigration.hosts.map(\.id))
+
+            self.hosts = profileMigration.hosts
+            self.sessions = profileMigration.sessions
+            self.tmuxShortcuts = profileMigration.shortcuts.filter { shortcut in
+                knownHostIDs.contains(shortcut.hostID)
+            }
+
+            if profileMigration.didChange {
+                save()
             }
         } catch {
             print("Failed to load data: \(error)")
@@ -227,6 +241,103 @@ final class DataStore {
         // During active development, this ensures all hosts pick up button changes
         host.ribbonConfigs = RibbonConfig.presets
         return host
+    }
+
+    private func migrateReverseTunnelProfile(
+        hosts: [Host],
+        sessions: [Session],
+        shortcuts: [TmuxShortcut]
+    ) -> (hosts: [Host], sessions: [Session], shortcuts: [TmuxShortcut], didChange: Bool) {
+        guard let sourceHost = hosts.first(where: isKnownMacProfile) else {
+            return (hosts, sessions, shortcuts, false)
+        }
+
+        let obsoleteHostIDs = Set(
+            hosts
+                .filter(isKnownMacProfile)
+                .map(\.id)
+        ).subtracting([Self.reverseTunnelMacHostID])
+
+        let tunnelHost = reverseTunnelMacHost(from: sourceHost)
+        var didChange = !obsoleteHostIDs.isEmpty
+
+        var migratedHosts = hosts.filter { host in
+            !isKnownMacProfile(host) || host.id == Self.reverseTunnelMacHostID
+        }
+
+        if let index = migratedHosts.firstIndex(where: { $0.id == Self.reverseTunnelMacHostID }) {
+            if !isSameReverseTunnelHost(migratedHosts[index], tunnelHost) {
+                migratedHosts[index] = tunnelHost
+                didChange = true
+            }
+        } else {
+            migratedHosts.append(tunnelHost)
+            didChange = true
+        }
+
+        var migratedSessions = sessions
+        for index in migratedSessions.indices where obsoleteHostIDs.contains(migratedSessions[index].hostID) {
+            migratedSessions[index].hostID = Self.reverseTunnelMacHostID
+            didChange = true
+        }
+
+        var migratedShortcuts = shortcuts
+        for index in migratedShortcuts.indices {
+            if obsoleteHostIDs.contains(migratedShortcuts[index].hostID) {
+                migratedShortcuts[index].hostID = Self.reverseTunnelMacHostID
+                didChange = true
+            }
+            if migratedShortcuts[index].hostID == Self.reverseTunnelMacHostID,
+               migratedShortcuts[index].hostDisplayName != tunnelHost.displayName {
+                migratedShortcuts[index].hostDisplayName = tunnelHost.displayName
+                didChange = true
+            }
+        }
+
+        return (migratedHosts, migratedSessions, migratedShortcuts, didChange)
+    }
+
+    private func isKnownMacProfile(_ host: Host) -> Bool {
+        if host.id == Self.reverseTunnelMacHostID || host.id == Self.obsoleteVPNMacHostID {
+            return true
+        }
+
+        if host.displayName == "This Mac" || host.displayName == "This Mac VPN" {
+            return true
+        }
+
+        return host.username == "raghu" &&
+            (host.hostname == "192.168.86.195" || host.hostname == "10.221.12.198")
+    }
+
+    private func reverseTunnelMacHost(from sourceHost: Host) -> Host {
+        Host(
+            id: Self.reverseTunnelMacHostID,
+            displayName: "This Mac via raghudt",
+            hostname: "127.0.0.1",
+            port: 22220,
+            username: sourceHost.username,
+            privateKeyRef: sourceHost.privateKeyRef,
+            jumpHost: SSHJumpHost(
+                hostname: "10.110.49.244",
+                port: 22,
+                username: "raghupathyk",
+                privateKeyRef: sourceHost.privateKeyRef
+            ),
+            defaultTmuxSessionName: sourceHost.defaultTmuxSessionName,
+            ribbonConfigs: sourceHost.ribbonConfigs,
+            createdAt: sourceHost.createdAt
+        )
+    }
+
+    private func isSameReverseTunnelHost(_ lhs: Host, _ rhs: Host) -> Bool {
+        lhs.displayName == rhs.displayName &&
+            lhs.hostname == rhs.hostname &&
+            lhs.port == rhs.port &&
+            lhs.username == rhs.username &&
+            lhs.privateKeyRef == rhs.privateKeyRef &&
+            lhs.jumpHost == rhs.jumpHost &&
+            lhs.defaultTmuxSessionName == rhs.defaultTmuxSessionName
     }
 
     private func createFileIfNeeded() {
