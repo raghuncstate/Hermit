@@ -13,6 +13,7 @@ IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_
 APP_DIR="$HOME/Library/Application Support/Hermit"
 LOG_DIR="$HOME/Library/Logs/Hermit"
 CONTROL_SOCKET="$APP_DIR/raghudt-tunnel.ctl"
+ACTION_STATE="$APP_DIR/raghudt-tunnel.last-action"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_PLIST_SOURCE="$SCRIPT_DIR/../launchd/$LABEL.plist"
 if [[ ! -f "$DEFAULT_PLIST_SOURCE" ]]; then
@@ -34,6 +35,10 @@ Commands:
   restart       Stop, then start
   status        Print human-readable status
   quiet-status  Exit 0 only when the SSH master tunnel is connected
+  loaded-status Exit 0 only when the LaunchAgent is loaded
+  diagnose      Print launchd status, checks, and recent logs
+  swiftbar-action <command>
+               Run a command from SwiftBar and record visible feedback
   run-once      Internal launchd command; run one foreground tunnel process
   logs          Tail the tunnel logs
 USAGE
@@ -82,7 +87,7 @@ start_agent() {
     launchctl bootstrap "$DOMAIN" "$PLIST_DEST"
   fi
   sleep 1
-  status
+  status || true
 }
 
 stop_agent() {
@@ -111,12 +116,115 @@ status() {
   fi
 
   if loaded; then
-    printf 'loaded but not connected; launchd will retry, or run: %s restart\n' "$0"
-    return 1
+    printf 'retrying: LaunchAgent loaded but tunnel is not connected\n'
+    print_recent_log_summary
+    return 75
   fi
 
   printf 'stopped\n'
   return 1
+}
+
+print_recent_log_summary() {
+  local last_log=""
+  local last_error=""
+
+  if [[ -f "$LOG_DIR/raghudt-tunnel.log" ]]; then
+    last_log="$(tail -n 1 "$LOG_DIR/raghudt-tunnel.log" 2>/dev/null || true)"
+  fi
+  if [[ -f "$LOG_DIR/raghudt-tunnel.err.log" ]]; then
+    last_error="$(tail -n 1 "$LOG_DIR/raghudt-tunnel.err.log" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$last_log" ]]; then
+    printf 'last log: %s\n' "$last_log"
+  fi
+  if [[ -n "$last_error" ]]; then
+    printf 'last error: %s\n' "$last_error"
+  fi
+}
+
+notify() {
+  local title="$1"
+  local message="$2"
+  /usr/bin/osascript -e "display notification \"${message//\"/\\\"}\" with title \"${title//\"/\\\"}\"" >/dev/null 2>&1 || true
+}
+
+record_action() {
+  ensure_dirs
+  local command="$1"
+  local code="$2"
+  local output="$3"
+  {
+    printf '%s command=%s exit=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$command" "$code"
+    printf '%s\n' "$output"
+  } > "$ACTION_STATE"
+}
+
+swiftbar_action() {
+  local command="${1:-}"
+  if [[ -z "$command" ]]; then
+    printf 'Missing SwiftBar command\n' >&2
+    return 64
+  fi
+
+  record_action "$command" "running" "Running $command..."
+
+  local output=""
+  local code=0
+  set +e
+  output="$("$0" "$command" 2>&1)"
+  code=$?
+  set -e
+
+  record_action "$command" "$code" "$output"
+
+  local summary
+  summary="$(printf '%s\n' "$output" | sed '/^[[:space:]]*$/d' | head -n 1)"
+  if [[ -z "$summary" ]]; then
+    summary="command finished with exit $code"
+  fi
+
+  notify "Hermit Tunnel" "$summary"
+  printf '%s\n' "$output"
+  return 0
+}
+
+diagnose() {
+  ensure_dirs
+  printf 'Hermit tunnel diagnosis\n'
+  printf 'Generated: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+
+  printf 'Status:\n'
+  status || true
+  printf '\n'
+
+  printf 'Checks:\n'
+  if [[ -r "$IDENTITY_FILE" ]]; then
+    printf '  identity: readable (%s)\n' "$IDENTITY_FILE"
+  else
+    printf '  identity: missing or unreadable (%s)\n' "$IDENTITY_FILE"
+  fi
+  if /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
+    printf '  remote SSH: reachable (%s:%s)\n' "$REMOTE_HOST" "$REMOTE_PORT"
+  else
+    printf '  remote SSH: NOT reachable (%s:%s)\n' "$REMOTE_HOST" "$REMOTE_PORT"
+  fi
+  if /usr/bin/nc -G 2 -z "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" >/dev/null 2>&1; then
+    printf '  local SSH: reachable (%s:%s)\n' "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT"
+  else
+    printf '  local SSH: NOT reachable (%s:%s)\n' "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT"
+  fi
+  printf '\n'
+
+  printf 'LaunchAgent:\n'
+  launchctl print "$DOMAIN/$LABEL" 2>&1 | sed -n '1,120p' || true
+  printf '\n'
+
+  printf 'Recent log:\n'
+  tail -n 30 "$LOG_DIR/raghudt-tunnel.log" 2>/dev/null || printf '  no standard log yet\n'
+  printf '\nRecent error log:\n'
+  tail -n 30 "$LOG_DIR/raghudt-tunnel.err.log" 2>/dev/null || printf '  no error log yet\n'
 }
 
 run_once() {
@@ -192,6 +300,16 @@ case "${1:-}" in
     ;;
   quiet-status)
     master_connected
+    ;;
+  loaded-status)
+    loaded
+    ;;
+  diagnose)
+    diagnose
+    ;;
+  swiftbar-action)
+    shift
+    swiftbar_action "${1:-}"
     ;;
   run-once)
     run_once
