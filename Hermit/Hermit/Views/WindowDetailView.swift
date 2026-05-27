@@ -412,13 +412,32 @@ struct WindowDetailView: View {
            let snapshot = model.snapshotsByPane[pane.id] {
             paneOutputView(pane: pane, snapshot: snapshot)
         } else if selectedPane != nil {
-            ContentUnavailableView(
-                model.errorMessage ?? "Loading Pane",
+            refreshableUnavailableView(
+                title: model.errorMessage ?? "Loading Pane",
                 systemImage: model.errorMessage == nil ? "terminal" : "exclamationmark.triangle",
-                description: Text(model.errorMessage == nil ? "Fetching pane output." : "Pull to refresh or reopen the window.")
+                description: model.errorMessage == nil ? "Fetching pane output." : "Pull to refresh or reopen the window."
             )
         } else {
-            ContentUnavailableView("No Pane Selected", systemImage: "rectangle.dashed")
+            refreshableUnavailableView(
+                title: "No Pane Selected",
+                systemImage: "rectangle.dashed",
+                description: "Pull to refresh the window."
+            )
+        }
+    }
+
+    private func refreshableUnavailableView(title: String, systemImage: String, description: String) -> some View {
+        ScrollView {
+            ContentUnavailableView(
+                title,
+                systemImage: systemImage,
+                description: Text(description)
+            )
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 320)
+        }
+        .refreshable {
+            await refreshSelectedPane()
         }
     }
 
@@ -441,6 +460,12 @@ struct WindowDetailView: View {
                 },
                 onManualScrollToBottom: {
                     resumeFollowForManualPaneScroll(pane)
+                },
+                onRefresh: { finish in
+                    Task { @MainActor in
+                        await refreshSelectedPane()
+                        finish()
+                    }
                 }
             )
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
@@ -1059,6 +1084,30 @@ struct WindowDetailView: View {
         }
     }
 
+    private func refreshSelectedPane() async {
+        let previousPaneId = selectedPane?.id
+        await model.refreshWindow(currentWindow)
+
+        let refreshedPanes = model.panes(for: currentWindow)
+        let refreshedPane = previousPaneId.flatMap { paneId in
+            refreshedPanes.first { $0.id == paneId }
+        } ?? model.activePane(for: currentWindow) ?? refreshedPanes.first
+
+        guard let refreshedPane else {
+            selectedPaneId = nil
+            return
+        }
+
+        selectedPaneId = refreshedPane.id
+        model.setFollow(refreshedPane.id, enabled: follow)
+        if follow {
+            await model.captureLive(refreshedPane)
+            requestPaneScroll(.bottom)
+        } else {
+            await model.captureScrollback(refreshedPane)
+        }
+    }
+
     private func requestPaneScroll(_ action: PaneScrollAction) {
         follow = action == .bottom
         if let pane = selectedPane {
@@ -1165,11 +1214,13 @@ struct WindowDetailView: View {
         var scrollRequest: PaneScrollRequest
         var onManualScrollAwayFromBottom: () -> Void
         var onManualScrollToBottom: () -> Void
+        var onRefresh: (@escaping () -> Void) -> Void
 
         func makeCoordinator() -> Coordinator {
             Coordinator(
                 onManualScrollAwayFromBottom: onManualScrollAwayFromBottom,
-                onManualScrollToBottom: onManualScrollToBottom
+                onManualScrollToBottom: onManualScrollToBottom,
+                onRefresh: onRefresh
             )
         }
 
@@ -1199,12 +1250,20 @@ struct WindowDetailView: View {
                 .foregroundColor: UIColor.systemBlue,
                 .underlineStyle: NSUnderlineStyle.single.rawValue,
             ]
+            let refreshControl = UIRefreshControl()
+            refreshControl.addTarget(
+                context.coordinator,
+                action: #selector(Coordinator.refreshPulled(_:)),
+                for: .valueChanged
+            )
+            textView.refreshControl = refreshControl
             return textView
         }
 
         func updateUIView(_ textView: UITextView, context: Context) {
             context.coordinator.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
             context.coordinator.onManualScrollToBottom = onManualScrollToBottom
+            context.coordinator.onRefresh = onRefresh
             context.coordinator.isProgrammaticScroll = true
             defer { context.coordinator.isProgrammaticScroll = false }
 
@@ -1390,6 +1449,7 @@ struct WindowDetailView: View {
         final class Coordinator: NSObject, UITextViewDelegate {
             var onManualScrollAwayFromBottom: () -> Void
             var onManualScrollToBottom: () -> Void
+            var onRefresh: (@escaping () -> Void) -> Void
             var rawText = ""
             var displayText = ""
             var fontSize: CGFloat = 0
@@ -1402,10 +1462,20 @@ struct WindowDetailView: View {
 
             init(
                 onManualScrollAwayFromBottom: @escaping () -> Void,
-                onManualScrollToBottom: @escaping () -> Void
+                onManualScrollToBottom: @escaping () -> Void,
+                onRefresh: @escaping (@escaping () -> Void) -> Void
             ) {
                 self.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
                 self.onManualScrollToBottom = onManualScrollToBottom
+                self.onRefresh = onRefresh
+            }
+
+            @objc func refreshPulled(_ refreshControl: UIRefreshControl) {
+                onRefresh {
+                    DispatchQueue.main.async {
+                        refreshControl.endRefreshing()
+                    }
+                }
             }
 
             func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -1418,6 +1488,10 @@ struct WindowDetailView: View {
             func scrollViewDidScroll(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll,
                       let dragStartOffset else {
+                    return
+                }
+
+                guard scrollView.contentOffset.y >= -scrollView.adjustedContentInset.top else {
                     return
                 }
 

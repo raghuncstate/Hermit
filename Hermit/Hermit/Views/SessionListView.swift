@@ -107,6 +107,9 @@ struct SessionListView: View {
                 }
             }
         }
+        .refreshable {
+            dataStore.load()
+        }
     }
 
     @ViewBuilder

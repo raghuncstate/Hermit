@@ -154,7 +154,12 @@ final class TmuxWorkspaceModel {
     }
 
     func refreshWindows(for session: TmuxSession) async {
-        guard let client else { return }
+        guard let client else {
+            await connectIfNeeded()
+            guard self.client != nil else { return }
+            await refreshWindows(for: session)
+            return
+        }
         do {
             let windows = try await client.listWindows(sessionId: session.id).sorted { $0.index < $1.index }
             windowsBySession[session.id] = windows
@@ -444,7 +449,12 @@ final class TmuxWorkspaceModel {
     }
 
     func refreshWindow(_ window: TmuxWindow) async {
-        guard let client else { return }
+        guard let client else {
+            await connectIfNeeded()
+            guard self.client != nil else { return }
+            await refreshWindow(window)
+            return
+        }
         do {
             panesByWindow[window.id] = try await client.listPanes(windowId: window.id).sorted { $0.index < $1.index }
         } catch {
