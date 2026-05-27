@@ -125,6 +125,10 @@ struct WindowDetailView: View {
         follow ? "live-\(selectedPane?.id ?? "none")" : "paused"
     }
 
+    private var shortcutSwitcherFavoriteLimit: Int {
+        UIDevice.current.userInterfaceIdiom == .phone ? 3 : 6
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
             terminalWorkspace
@@ -523,7 +527,7 @@ struct WindowDetailView: View {
 
     @ViewBuilder
     private var shortcutSwitcherSections: some View {
-        let favorites = dataStore.favoriteTmuxShortcuts(limit: 6)
+        let favorites = dataStore.favoriteTmuxShortcuts(limit: shortcutSwitcherFavoriteLimit)
         if !favorites.isEmpty {
             shortcutHeader("Favorites")
             ForEach(favorites) { shortcut in

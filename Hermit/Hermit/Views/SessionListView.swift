@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private enum AppRoute: Hashable {
     case host(UUID)
@@ -11,6 +12,10 @@ struct SessionListView: View {
     @State private var showingNewHost = false
     @State private var showingSettings = false
     @State private var navigationPath: [AppRoute] = []
+
+    private var favoriteShortcutLimit: Int {
+        UIDevice.current.userInterfaceIdiom == .phone ? 3 : 12
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -59,7 +64,7 @@ struct SessionListView: View {
 
     private var hostList: some View {
         List {
-            let favoriteShortcuts = dataStore.favoriteTmuxShortcuts()
+            let favoriteShortcuts = dataStore.favoriteTmuxShortcuts(limit: favoriteShortcutLimit)
             if !favoriteShortcuts.isEmpty {
                 Section("Favorites") {
                     ForEach(favoriteShortcuts) { shortcut in

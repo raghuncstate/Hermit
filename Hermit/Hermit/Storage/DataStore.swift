@@ -76,13 +76,15 @@ final class DataStore {
             )
             let knownHostIDs = Set(profileMigration.hosts.map(\.id))
 
-            self.hosts = profileMigration.hosts
-            self.sessions = profileMigration.sessions
-            self.tmuxShortcuts = profileMigration.shortcuts.filter { shortcut in
+            let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
                 knownHostIDs.contains(shortcut.hostID)
             }
 
-            if profileMigration.didChange {
+            self.hosts = profileMigration.hosts
+            self.sessions = profileMigration.sessions
+            self.tmuxShortcuts = filteredShortcuts
+
+            if profileMigration.didChange || filteredShortcuts.count != profileMigration.shortcuts.count {
                 save()
             }
         } catch {
@@ -294,7 +296,29 @@ final class DataStore {
             }
         }
 
+        let dedupedShortcuts = deduplicatedTmuxShortcuts(migratedShortcuts)
+        if dedupedShortcuts.didChange {
+            migratedShortcuts = dedupedShortcuts.shortcuts
+            didChange = true
+        }
+
         return (migratedHosts, migratedSessions, migratedShortcuts, didChange)
+    }
+
+    private func deduplicatedTmuxShortcuts(_ shortcuts: [TmuxShortcut]) -> (shortcuts: [TmuxShortcut], didChange: Bool) {
+        var deduped: [TmuxShortcut] = []
+        var didChange = false
+
+        for shortcut in shortcuts {
+            if let index = deduped.firstIndex(where: { $0.matches(shortcut) }) {
+                deduped[index].mergeMetadata(from: shortcut)
+                didChange = true
+            } else {
+                deduped.append(shortcut)
+            }
+        }
+
+        return (deduped, didChange)
     }
 
     private func isKnownMacProfile(_ host: Host) -> Bool {
@@ -533,6 +557,17 @@ struct TmuxShortcut: Codable, Identifiable, Hashable {
         paneID = shortcut.paneID
         paneIndex = shortcut.paneIndex
         paneCommand = shortcut.paneCommand
+    }
+
+    mutating func mergeMetadata(from shortcut: TmuxShortcut) {
+        if shortcut.lastVisitedAt >= lastVisitedAt {
+            updateMetadata(from: shortcut)
+        }
+        isFavorite = isFavorite || shortcut.isFavorite
+        visitCount = max(visitCount, shortcut.visitCount)
+        if shortcut.lastVisitedAt > lastVisitedAt {
+            lastVisitedAt = shortcut.lastVisitedAt
+        }
     }
 }
 
