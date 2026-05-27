@@ -84,6 +84,7 @@ struct WindowDetailView: View {
     @State private var commandText = ""
     @State private var streamedInputText = ""
     @State private var suppressInputChange = false
+    @State private var commandIdleSubmitTask: Task<Void, Never>?
     @State private var showingVoiceModal = false
     @State private var showingWindowSwitcher = false
     @State private var windowSwitcherScope: WindowSwitcherScope = .currentSession
@@ -818,7 +819,7 @@ struct WindowDetailView: View {
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.return)
                 .onChange(of: commandText) { _, newValue in
-                    streamInputChange(to: newValue)
+                    handleCommandTextChange(to: newValue)
                 }
                 .onSubmit(sendEnter)
 
@@ -838,35 +839,63 @@ struct WindowDetailView: View {
         .background(.regularMaterial)
     }
 
-    private func streamInputChange(to newValue: String) {
+    private func handleCommandTextChange(to newValue: String) {
         guard !suppressInputChange else { return }
-        guard let pane = selectedPane else {
-            streamedInputText = newValue
+
+        let submitPhraseResult = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: newValue)
+        if submitPhraseResult.shouldSubmit {
+            commandIdleSubmitTask?.cancel()
+            submitCommandBoxText(submitPhraseResult.command, allowEmpty: false)
             return
+        }
+
+        let delta = streamInputChange(to: newValue)
+        if shouldScheduleCommandIdleSubmit(delta: delta, command: newValue) {
+            scheduleCommandIdleSubmit(for: newValue)
+        } else if newValue.isEmpty {
+            commandIdleSubmitTask?.cancel()
+        }
+    }
+
+    @discardableResult
+    private func streamInputChange(to newValue: String) -> (backspaceCount: Int, insertedText: String) {
+        guard !suppressInputChange else { return (0, "") }
+        guard let pane = selectedPane else {
+            let delta = inputDelta(from: streamedInputText, to: newValue)
+            streamedInputText = newValue
+            return delta
         }
 
         let delta = inputDelta(from: streamedInputText, to: newValue)
         guard delta.backspaceCount > 0 || !delta.insertedText.isEmpty else {
             streamedInputText = newValue
-            return
+            return delta
         }
 
         resumeFollowForInput(pane)
-
-        if delta.backspaceCount > 0 {
-            Task { await model.sendBackspace(count: delta.backspaceCount, to: pane) }
+        Task {
+            await model.sendInputDelta(
+                backspaceCount: delta.backspaceCount,
+                insertedText: delta.insertedText,
+                enter: false,
+                to: pane
+            )
         }
-
-        if !delta.insertedText.isEmpty {
-            Task { await model.sendInputText(delta.insertedText, to: pane) }
-        }
-
         streamedInputText = newValue
+        return delta
     }
 
     private func sendEnter() {
+        submitCommandBoxText(commandText, allowEmpty: true)
+    }
+
+    private func submitCommandBoxText(_ text: String, allowEmpty: Bool) {
+        let command = text
+        guard allowEmpty || !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let pane = selectedPane else { return }
 
+        commandIdleSubmitTask?.cancel()
+        let delta = inputDelta(from: streamedInputText, to: command)
         suppressInputChange = true
         commandText = ""
         streamedInputText = ""
@@ -875,12 +904,43 @@ struct WindowDetailView: View {
         }
 
         resumeFollowForInput(pane)
-        Task { await model.sendEnter(to: pane) }
+        Task {
+            await model.sendInputDelta(
+                backspaceCount: delta.backspaceCount,
+                insertedText: delta.insertedText,
+                enter: true,
+                to: pane
+            )
+        }
     }
 
     private func sendCommandText(_ command: String, to pane: TmuxPane) {
+        let cleanedCommand = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: command).command
+        guard !cleanedCommand.isEmpty else { return }
+
         resumeFollowForInput(pane)
-        Task { await model.sendCommand(command, to: pane) }
+        Task { await model.sendCommand(cleanedCommand, to: pane) }
+    }
+
+    private func shouldScheduleCommandIdleSubmit(
+        delta: (backspaceCount: Int, insertedText: String),
+        command: String
+    ) -> Bool {
+        !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && delta.backspaceCount == 0
+            && VoiceCommandAutoSubmit.insertedTextLooksDictated(delta.insertedText)
+    }
+
+    private func scheduleCommandIdleSubmit(for command: String) {
+        commandIdleSubmitTask?.cancel()
+        commandIdleSubmitTask = Task {
+            try? await Task.sleep(nanoseconds: VoiceCommandAutoSubmit.idleDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard commandText == command else { return }
+                submitCommandBoxText(command, allowEmpty: false)
+            }
+        }
     }
 
     private func resumeFollowForInput(_ pane: TmuxPane) {

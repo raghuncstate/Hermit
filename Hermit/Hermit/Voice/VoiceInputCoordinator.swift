@@ -22,3 +22,34 @@ final class VoiceInputCoordinator {
         isShowingVoiceModal = true
     }
 }
+
+enum VoiceCommandAutoSubmit {
+    static let idleDelayNanoseconds: UInt64 = 2_500_000_000
+
+    private static let submitPhrases = [
+        "send the message",
+        "send message",
+    ]
+
+    static func commandByRemovingSubmitPhrase(from text: String) -> (command: String, shouldSubmit: Bool) {
+        for phrase in submitPhrases {
+            if let range = text.range(of: phrase, options: [.caseInsensitive, .diacriticInsensitive]) {
+                let command = text[..<range.lowerBound] + text[range.upperBound...]
+                return (cleanCommand(String(command)), true)
+            }
+        }
+
+        return (cleanCommand(text), false)
+    }
+
+    static func cleanCommand(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".,!?")))
+    }
+
+    static func insertedTextLooksDictated(_ insertedText: String) -> Bool {
+        let cleaned = cleanCommand(insertedText)
+        guard !cleaned.isEmpty else { return false }
+
+        return cleaned.count >= 4 || cleaned.contains { $0.isWhitespace }
+    }
+}

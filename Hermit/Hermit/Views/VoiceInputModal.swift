@@ -7,6 +7,8 @@ struct VoiceInputModal: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isFocused: Bool
     @StateObject private var transcriber = SpeechTranscriber()
+    @State private var autoSendTask: Task<Void, Never>?
+    @State private var hasSent = false
     let onSend: (String) -> Void
 
     var body: some View {
@@ -42,8 +44,7 @@ struct VoiceInputModal: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Send") {
-                        onSend(text)
-                        dismiss()
+                        submit(text)
                     }
                     .disabled(text.isEmpty)
                 }
@@ -51,15 +52,54 @@ struct VoiceInputModal: View {
             .onAppear {
                 isFocused = true
                 transcriber.start()
+                if !text.isEmpty {
+                    scheduleIdleSubmit()
+                }
             }
             .onDisappear {
+                autoSendTask?.cancel()
                 transcriber.stop()
             }
             .onReceive(transcriber.$transcript) { transcript in
                 guard !transcript.isEmpty else { return }
-                text = transcript
+                handleTranscript(transcript)
             }
         }
+    }
+
+    private func handleTranscript(_ transcript: String) {
+        guard !hasSent else { return }
+
+        let result = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: transcript)
+        text = result.command
+
+        if result.shouldSubmit {
+            submit(result.command)
+        } else {
+            scheduleIdleSubmit()
+        }
+    }
+
+    private func scheduleIdleSubmit() {
+        autoSendTask?.cancel()
+        autoSendTask = Task {
+            try? await Task.sleep(nanoseconds: VoiceCommandAutoSubmit.idleDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                submit(text)
+            }
+        }
+    }
+
+    private func submit(_ value: String) {
+        let command = VoiceCommandAutoSubmit.cleanCommand(value)
+        guard !hasSent, !command.isEmpty else { return }
+
+        hasSent = true
+        autoSendTask?.cancel()
+        transcriber.stop()
+        onSend(command)
+        dismiss()
     }
 }
 

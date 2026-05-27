@@ -314,6 +314,24 @@ final class TmuxWorkspaceModel {
         }
     }
 
+    func sendInputDelta(backspaceCount: Int, insertedText: String, enter: Bool, to pane: TmuxPane) async {
+        guard backspaceCount > 0 || !insertedText.isEmpty || enter else { return }
+        do {
+            if backspaceCount > 0 {
+                try await client?.sendBackspace(count: backspaceCount, to: pane.id)
+            }
+            if !insertedText.isEmpty {
+                try await client?.sendText(insertedText, to: pane.id, enter: false)
+            }
+            if enter {
+                try await client?.sendText("", to: pane.id, enter: true)
+            }
+            await captureAfterInput(pane)
+        } catch {
+            handle(error)
+        }
+    }
+
     func sendEnter(to pane: TmuxPane) async {
         do {
             try await client?.sendText("", to: pane.id, enter: true)

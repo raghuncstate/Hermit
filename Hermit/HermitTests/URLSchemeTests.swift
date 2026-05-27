@@ -39,4 +39,24 @@ struct URLSchemeTests {
         coordinator.handleCallbackURL(url)
         #expect(coordinator.transcribedText == "say \"hello\" & goodbye")
     }
+
+    @Test func stripsVoiceSubmitPhrase() {
+        let result = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: "git status send the message")
+
+        #expect(result.shouldSubmit)
+        #expect(result.command == "git status")
+    }
+
+    @Test func stripsVoiceSubmitPhraseWithTrailingPunctuation() {
+        let result = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: "echo hello send message.")
+
+        #expect(result.shouldSubmit)
+        #expect(result.command == "echo hello")
+    }
+
+    @Test func detectsDictatedTextChunks() {
+        #expect(VoiceCommandAutoSubmit.insertedTextLooksDictated("git status"))
+        #expect(VoiceCommandAutoSubmit.insertedTextLooksDictated("hello"))
+        #expect(!VoiceCommandAutoSubmit.insertedTextLooksDictated("g"))
+    }
 }
