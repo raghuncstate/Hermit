@@ -163,13 +163,22 @@ struct WindowDetailView: View {
             }
 
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    toggleFavorite(window: currentWindow, session: currentSession)
+                } label: {
+                    Image(systemName: dataStore.isFavorite(windowShortcut(currentWindow, session: currentSession)) ? "star.fill" : "star")
+                }
+                .accessibilityLabel("Favorite Window")
+
                 if let pane = selectedPane {
+                    let request = killRequestForSelectedTarget(pane)
                     Button {
-                        toggleFavorite(pane: pane, in: currentWindow, session: currentSession)
+                        killRequest = request
                     } label: {
-                        Image(systemName: dataStore.isFavorite(paneShortcut(pane, in: currentWindow, session: currentSession)) ? "star.fill" : "star")
+                        Image(systemName: "trash")
                     }
-                    .accessibilityLabel("Favorite Pane")
+                    .tint(.red)
+                    .accessibilityLabel(request.destructiveLabel)
                 }
 
                 terminalFontMenu
@@ -337,8 +346,9 @@ struct WindowDetailView: View {
                 .buttonBorderShape(.roundedRectangle)
                 .accessibilityLabel("Go to Bottom")
 
+                let request = killRequestForSelectedTarget(pane)
                 Button(role: .destructive) {
-                    killRequest = KillRequest(target: .pane(pane, currentWindow))
+                    killRequest = request
                 } label: {
                     Image(systemName: "trash")
                         .frame(width: 30, height: 30)
@@ -346,7 +356,7 @@ struct WindowDetailView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
                 .tint(.red)
-                .accessibilityLabel("Kill Selected Pane")
+                .accessibilityLabel(request.destructiveLabel)
 
                 Menu {
                     Button {
@@ -553,7 +563,7 @@ struct WindowDetailView: View {
 
     @ViewBuilder
     private var shortcutSwitcherSections: some View {
-        let favorites = dataStore.favoriteTmuxShortcuts(limit: shortcutSwitcherFavoriteLimit)
+        let favorites = dataStore.favoriteTmuxShortcuts(limit: shortcutSwitcherFavoriteLimit, kind: .window)
         if !favorites.isEmpty {
             shortcutHeader("Favorites")
             ForEach(favorites) { shortcut in
@@ -563,7 +573,7 @@ struct WindowDetailView: View {
                 .padding(.vertical, 4)
         }
 
-        let frequent = dataStore.frequentTmuxShortcuts(limit: 6)
+        let frequent = dataStore.frequentTmuxShortcuts(limit: 6, kind: .window)
         if !frequent.isEmpty {
             shortcutHeader("Frequent")
             ForEach(frequent) { shortcut in
@@ -595,10 +605,10 @@ struct WindowDetailView: View {
                         .frame(width: 22, alignment: .center)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(shortcut.displayTitle)
+                        Text(shortcut.windowName)
                             .font(.caption.weight(.semibold))
                             .lineLimit(1)
-                        Text(shortcut.displaySubtitle)
+                        Text("\(shortcut.hostDisplayName) - \(shortcut.sessionName)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -630,154 +640,59 @@ struct WindowDetailView: View {
     }
 
     private func windowSwitcherSection(for tmuxWindow: TmuxWindow, in tmuxSession: TmuxSession) -> some View {
-        let windowPanes = model.panes(for: tmuxWindow)
         let isCurrentWindow = tmuxWindow.id == currentWindow.id
 
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center, spacing: 8) {
-                Button {
-                    switchToWindow(tmuxWindow, in: tmuxSession)
-                } label: {
-                    HStack(alignment: .center, spacing: 10) {
-                        Text("#\(tmuxWindow.index)")
-                            .font(.caption.weight(.semibold).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 36, alignment: .center)
+        return HStack(alignment: .center, spacing: 8) {
+            Button {
+                switchToWindow(tmuxWindow, in: tmuxSession)
+            } label: {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(tmuxWindow.name)
+                        .font(.body.weight(isCurrentWindow ? .semibold : .regular))
+                        .foregroundStyle(isCurrentWindow ? .primary : .primary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tmuxWindow.name)
-                                .font(.body.weight(isCurrentWindow ? .semibold : .regular))
-                                .lineLimit(1)
-                            Text(windowSwitcherScope == .allSessions ? "\(tmuxSession.name) - \(windowPanes.count) panes" : "\(windowPanes.count) panes")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-
-                        Spacer(minLength: 0)
-
-                        if isCurrentWindow {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.tint)
-                        }
+                    if isCurrentWindow {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.tint)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 46, alignment: .center)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-
-                Menu {
-                    Button {
-                        toggleFavorite(window: tmuxWindow, session: tmuxSession)
-                    } label: {
-                        Label(
-                            dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "Unfavorite" : "Favorite",
-                            systemImage: dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "star.slash" : "star"
-                        )
-                    }
-
-                    Button(role: .destructive) {
-                        killRequest = KillRequest(target: .window(tmuxWindow))
-                    } label: {
-                        Label("Kill Window", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 34, height: 34, alignment: .center)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle)
-                .accessibilityLabel("Window Actions \(tmuxWindow.name)")
-
-                Button(role: .destructive) {
-                    killRequest = KillRequest(target: .window(tmuxWindow))
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 34, height: 34, alignment: .center)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle)
-                .tint(.red)
-                .accessibilityLabel("Kill Window \(tmuxWindow.name)")
+                .frame(maxWidth: .infinity, minHeight: 42, alignment: .center)
+                .contentShape(Rectangle())
             }
-            .task(id: tmuxWindow.id) {
-                await model.refreshPanes(for: tmuxWindow)
+            .buttonStyle(.plain)
+
+            Button {
+                toggleFavorite(window: tmuxWindow, session: tmuxSession)
+            } label: {
+                Image(systemName: dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "star.fill" : "star")
+                    .foregroundStyle(dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? .yellow : .secondary)
+                    .frame(width: 30, height: 30, alignment: .center)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(isCurrentWindow ? Color.accentColor.opacity(0.10) : Color.clear)
+            .buttonStyle(.plain)
+            .accessibilityLabel(dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "Unfavorite \(tmuxWindow.name)" : "Favorite \(tmuxWindow.name)")
 
-            if !windowPanes.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(windowPanes) { pane in
-                        HStack(alignment: .center, spacing: 6) {
-                            Button {
-                                switchToPane(pane, in: tmuxWindow, session: tmuxSession)
-                            } label: {
-                                HStack(alignment: .center, spacing: 8) {
-                                    Image(systemName: pane.id == selectedPane?.id ? "terminal.fill" : "terminal")
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 20, alignment: .center)
-
-                                    Text("#\(pane.index)")
-                                        .font(.caption.weight(.semibold).monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24, alignment: .center)
-
-                                    Text(pane.currentCommand)
-                                        .font(.caption)
-                                        .lineLimit(1)
-
-                                    Spacer(minLength: 0)
-                                }
-                                .frame(maxWidth: .infinity, minHeight: 32, alignment: .center)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Menu {
-                                Button {
-                                    toggleFavorite(pane: pane, in: tmuxWindow, session: tmuxSession)
-                                } label: {
-                                    Label(
-                                        dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "Unfavorite" : "Favorite",
-                                        systemImage: dataStore.isFavorite(paneShortcut(pane, in: tmuxWindow, session: tmuxSession)) ? "star.slash" : "star"
-                                    )
-                                }
-
-                                Button(role: .destructive) {
-                                    killRequest = KillRequest(target: .pane(pane, tmuxWindow))
-                                } label: {
-                                    Label("Kill Pane", systemImage: "trash")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.caption)
-                                    .frame(width: 28, height: 28, alignment: .center)
-                            }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.roundedRectangle)
-                            .accessibilityLabel("Pane Actions \(pane.index)")
-
-                            Button(role: .destructive) {
-                                killRequest = KillRequest(target: .pane(pane, tmuxWindow))
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.caption)
-                                    .frame(width: 28, height: 28, alignment: .center)
-                            }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.roundedRectangle)
-                            .tint(.red)
-                            .accessibilityLabel("Kill Pane \(pane.index)")
-                        }
-                        .padding(.leading, 14)
-                    }
-                }
-                .padding(.top, 2)
+            Button(role: .destructive) {
+                killRequest = KillRequest(target: .window(tmuxWindow))
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundStyle(.red)
+                    .frame(width: 30, height: 30, alignment: .center)
             }
-
-            Divider()
+            .buttonStyle(.plain)
+            .accessibilityLabel("Kill Window \(tmuxWindow.name)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(isCurrentWindow ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(alignment: .leading) {
+            if isCurrentWindow {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 6)
+            }
         }
     }
 
@@ -1057,6 +972,13 @@ struct WindowDetailView: View {
         }
     }
 
+    private func killRequestForSelectedTarget(_ pane: TmuxPane) -> KillRequest {
+        if panes.count <= 1 {
+            return KillRequest(target: .window(currentWindow))
+        }
+        return KillRequest(target: .pane(pane, currentWindow))
+    }
+
     private func killWindow(_ tmuxWindow: TmuxWindow) {
         let targetSession = session(for: tmuxWindow)
         Task { @MainActor in
@@ -1141,6 +1063,12 @@ struct WindowDetailView: View {
             for tmuxSession in sessionsToRefresh {
                 await model.refreshWindows(for: tmuxSession)
             }
+            dataStore.reconcileTmuxShortcuts(
+                for: model.host,
+                sessions: model.sessions,
+                windowsBySession: model.windowsBySession,
+                panesByWindow: model.panesByWindow
+            )
         }
     }
 

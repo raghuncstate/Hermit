@@ -24,7 +24,7 @@ struct SessionListView: View {
                     ContentUnavailableView(
                         "No Hosts",
                         systemImage: "server.rack",
-                        description: Text("Add a host to open a mobile tmux control session.")
+                        description: Text("Add a host to open tmux windows.")
                     )
                 } else {
                     hostList
@@ -64,7 +64,7 @@ struct SessionListView: View {
 
     private var hostList: some View {
         List {
-            let favoriteShortcuts = dataStore.favoriteTmuxShortcuts(limit: favoriteShortcutLimit)
+            let favoriteShortcuts = dataStore.favoriteTmuxShortcuts(limit: favoriteShortcutLimit, kind: .window)
             if !favoriteShortcuts.isEmpty {
                 Section("Favorites") {
                     ForEach(favoriteShortcuts) { shortcut in
@@ -73,7 +73,7 @@ struct SessionListView: View {
                 }
             }
 
-            let frequentShortcuts = dataStore.frequentTmuxShortcuts()
+            let frequentShortcuts = dataStore.frequentTmuxShortcuts(kind: .window)
             if !frequentShortcuts.isEmpty {
                 Section("Frequently Used") {
                     ForEach(frequentShortcuts) { shortcut in
@@ -91,7 +91,7 @@ struct SessionListView: View {
                             Text(hostConnectionSummary(host))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Text("mobile session: \(host.defaultTmuxSessionName)")
+                            Text("attach session: \(host.defaultTmuxSessionName)")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -189,6 +189,7 @@ struct TmuxShortcutDestinationView: View {
     let host: Host
     let shortcut: TmuxShortcut
 
+    @Environment(DataStore.self) private var dataStore
     @State private var model: TmuxWorkspaceModel
     @State private var resolvedShortcut: ResolvedTmuxShortcut?
     @State private var errorMessage: String?
@@ -235,6 +236,7 @@ struct TmuxShortcutDestinationView: View {
         await model.refreshSessions()
 
         guard let session = matchingSession() else {
+            dataStore.removeTmuxShortcut(shortcut)
             errorMessage = "The tmux session \(shortcut.sessionName) was not found on \(host.displayName)."
             return
         }
@@ -242,6 +244,7 @@ struct TmuxShortcutDestinationView: View {
         await model.refreshWindows(for: session)
 
         guard let window = matchingWindow(in: session) else {
+            dataStore.removeTmuxShortcut(shortcut)
             errorMessage = "The tmux window \(shortcut.windowName) was not found in \(session.name)."
             return
         }
@@ -250,6 +253,7 @@ struct TmuxShortcutDestinationView: View {
         let pane = matchingPane(in: window)
 
         if shortcut.kind == .pane, pane == nil {
+            dataStore.removeTmuxShortcut(shortcut)
             errorMessage = "The saved pane was not found. The window may have changed."
             resolvedShortcut = ResolvedTmuxShortcut(session: session, window: window, pane: nil)
             return

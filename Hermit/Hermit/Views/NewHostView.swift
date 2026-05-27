@@ -10,7 +10,7 @@ struct NewHostView: View {
     @State private var hostname = ""
     @State private var port = "22"
     @State private var username = ""
-    @State private var defaultTmuxSessionName = "mobile"
+    @State private var defaultTmuxSessionName = "0"
     @State private var privateKeyPEM = ""
     @State private var errorMessage: String?
 
@@ -29,7 +29,7 @@ struct NewHostView: View {
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    TextField("Mobile tmux Session", text: $defaultTmuxSessionName)
+                    TextField("Attach tmux Session", text: $defaultTmuxSessionName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
@@ -89,7 +89,7 @@ struct NewHostView: View {
             port: portNumber,
             username: username,
             privateKeyRef: privateKeyPEM.isEmpty ? "" : keychainRef,
-            defaultTmuxSessionName: defaultTmuxSessionName.isEmpty ? "mobile" : defaultTmuxSessionName
+            defaultTmuxSessionName: defaultTmuxSessionName.isEmpty ? "0" : defaultTmuxSessionName
         )
         dataStore.addHost(host)
         onCreated?(host)

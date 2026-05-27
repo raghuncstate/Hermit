@@ -69,22 +69,28 @@ final class DataStore {
             guard let data else { return }
 
             let backup = try JSONDecoder.hermit.decode(BackupData.self, from: data)
+            let migratedHosts = backup.hosts.map { migrateHost($0) }
+            let hostsDidChange = zip(backup.hosts, migratedHosts).contains { original, migrated in
+                original.defaultTmuxSessionName != migrated.defaultTmuxSessionName
+            }
             let profileMigration = migrateReverseTunnelProfile(
-                hosts: backup.hosts.map { migrateHost($0) },
+                hosts: migratedHosts,
                 sessions: backup.sessions,
                 shortcuts: backup.tmuxShortcuts
             )
             let knownHostIDs = Set(profileMigration.hosts.map(\.id))
+            let raghudtHostIDs = Set(profileMigration.hosts.filter(isKnownRaghudtProfile).map(\.id))
 
             let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
-                knownHostIDs.contains(shortcut.hostID)
+                knownHostIDs.contains(shortcut.hostID) &&
+                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile")
             }
 
             self.hosts = profileMigration.hosts
             self.sessions = profileMigration.sessions
             self.tmuxShortcuts = filteredShortcuts
 
-            if profileMigration.didChange || filteredShortcuts.count != profileMigration.shortcuts.count {
+            if hostsDidChange || profileMigration.didChange || filteredShortcuts.count != profileMigration.shortcuts.count {
                 save()
             }
         } catch {
@@ -164,19 +170,25 @@ final class DataStore {
         hosts.first { $0.id == shortcut.hostID }
     }
 
-    func favoriteTmuxShortcuts(limit: Int = 12) -> [TmuxShortcut] {
+    func favoriteTmuxShortcuts(limit: Int = 12, kind: TmuxShortcutKind? = nil) -> [TmuxShortcut] {
         Array(
             tmuxShortcuts
-                .filter(\.isFavorite)
+                .filter { shortcut in
+                    shortcut.isFavorite && (kind.map { shortcut.kind == $0 } ?? true)
+                }
                 .sorted(by: compareShortcutsByRecentUse)
                 .prefix(limit)
         )
     }
 
-    func frequentTmuxShortcuts(limit: Int = 8) -> [TmuxShortcut] {
+    func frequentTmuxShortcuts(limit: Int = 8, kind: TmuxShortcutKind? = nil) -> [TmuxShortcut] {
         Array(
             tmuxShortcuts
-                .filter { !$0.isFavorite && $0.visitCount > 0 }
+                .filter { shortcut in
+                    !shortcut.isFavorite &&
+                        shortcut.visitCount > 0 &&
+                        (kind.map { shortcut.kind == $0 } ?? true)
+                }
                 .sorted { lhs, rhs in
                     if lhs.visitCount != rhs.visitCount {
                         return lhs.visitCount > rhs.visitCount
@@ -185,6 +197,14 @@ final class DataStore {
                 }
                 .prefix(limit)
         )
+    }
+
+    func removeTmuxShortcut(_ shortcut: TmuxShortcut) {
+        let originalCount = tmuxShortcuts.count
+        tmuxShortcuts.removeAll { $0.matches(shortcut) }
+        if tmuxShortcuts.count != originalCount {
+            save()
+        }
     }
 
     func isFavorite(_ shortcut: TmuxShortcut) -> Bool {
@@ -209,6 +229,28 @@ final class DataStore {
         }
         pruneTmuxShortcuts()
         save()
+    }
+
+    func reconcileTmuxShortcuts(
+        for host: Host,
+        sessions: [TmuxSession],
+        windowsBySession: [String: [TmuxWindow]],
+        panesByWindow: [String: [TmuxPane]]
+    ) {
+        let originalCount = tmuxShortcuts.count
+        tmuxShortcuts.removeAll { shortcut in
+            guard shortcut.hostID == host.id else { return false }
+            guard let session = sessions.first(where: shortcut.matches(session:)) else { return true }
+            guard let window = windowsBySession[session.id]?.first(where: shortcut.matches(window:)) else { return true }
+
+            guard shortcut.kind == .pane else { return false }
+            guard let panes = panesByWindow[window.id], !panes.isEmpty else { return false }
+            return !panes.contains(where: shortcut.matches(pane:))
+        }
+
+        if tmuxShortcuts.count != originalCount {
+            save()
+        }
     }
 
     private func upsert(_ shortcut: TmuxShortcut, update: (inout TmuxShortcut) -> Void) {
@@ -239,6 +281,9 @@ final class DataStore {
 
     private func migrateHost(_ host: Host) -> Host {
         var host = host
+        if isKnownRaghudtProfile(host), host.defaultTmuxSessionName == "mobile" {
+            host.defaultTmuxSessionName = "0"
+        }
         // Always sync ribbon configs to current defaults
         // During active development, this ensures all hosts pick up button changes
         host.ribbonConfigs = RibbonConfig.presets
@@ -332,6 +377,12 @@ final class DataStore {
 
         return host.username == "raghu" &&
             (host.hostname == "192.168.86.195" || host.hostname == "10.221.12.198")
+    }
+
+    private func isKnownRaghudtProfile(_ host: Host) -> Bool {
+        host.hostname == "raghudt" ||
+            host.hostname == "10.110.49.244" ||
+            host.displayName.localizedCaseInsensitiveCompare("raghudt") == .orderedSame
     }
 
     private func reverseTunnelMacHost(from sourceHost: Host) -> Host {
@@ -497,18 +548,7 @@ struct TmuxShortcut: Codable, Identifiable, Hashable {
     }
 
     var displayTitle: String {
-        switch kind {
-        case .window:
-            return windowName
-        case .pane:
-            if let paneCommand, !paneCommand.isEmpty {
-                return paneCommand
-            }
-            if let paneIndex {
-                return "Pane \(paneIndex)"
-            }
-            return windowName
-        }
+        windowName
     }
 
     var displaySubtitle: String {
@@ -545,6 +585,22 @@ struct TmuxShortcut: Codable, Identifiable, Hashable {
             let samePaneFallback = paneIndex != nil && paneIndex == other.paneIndex
             return samePaneID || samePaneFallback
         }
+    }
+
+    func matches(session: TmuxSession) -> Bool {
+        (!sessionID.isEmpty && sessionID == session.id) || sessionName == session.name
+    }
+
+    func matches(window: TmuxWindow) -> Bool {
+        let sameWindowID = !windowID.isEmpty && windowID == window.id
+        let sameWindowFallback = windowName == window.name && windowIndex == window.index
+        return sameWindowID || sameWindowFallback || windowName == window.name
+    }
+
+    func matches(pane: TmuxPane) -> Bool {
+        let samePaneID = paneID != nil && paneID == pane.id
+        let samePaneFallback = paneIndex != nil && paneIndex == pane.index
+        return samePaneID || samePaneFallback
     }
 
     mutating func updateMetadata(from shortcut: TmuxShortcut) {

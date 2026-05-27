@@ -70,7 +70,7 @@ struct DataStoreTests {
         #expect(decoded.tmuxShortcuts.count == 1)
         #expect(decoded.tmuxShortcuts[0].isFavorite)
         #expect(decoded.tmuxShortcuts[0].visitCount == 7)
-        #expect(decoded.tmuxShortcuts[0].displayTitle == "zsh")
+        #expect(decoded.tmuxShortcuts[0].displayTitle == "codex")
     }
 
     @Test func backupReadsOlderFilesWithoutShortcuts() throws {
@@ -86,6 +86,24 @@ struct DataStoreTests {
         let decoded = try JSONDecoder.hermit.decode(BackupData.self, from: Data(json.utf8))
 
         #expect(decoded.tmuxShortcuts.isEmpty)
+    }
+
+    @Test func hostDefaultsToExistingTmuxSessionName() throws {
+        let json = """
+        {
+          "createdAt" : "2026-05-25T00:00:00Z",
+          "displayName" : "raghudt",
+          "hostname" : "10.110.49.244",
+          "id" : "00000000-0000-0000-0000-000000000001",
+          "port" : 22,
+          "privateKeyRef" : "test-key",
+          "username" : "raghupathyk"
+        }
+        """
+
+        let decoded = try JSONDecoder.hermit.decode(Host.self, from: Data(json.utf8))
+
+        #expect(decoded.defaultTmuxSessionName == "0")
     }
 
     @Test func tmuxShortcutMergeKeepsFavoriteAndLatestMetadata() throws {

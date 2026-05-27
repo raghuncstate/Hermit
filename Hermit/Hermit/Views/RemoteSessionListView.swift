@@ -6,7 +6,7 @@ struct RemoteSessionListView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: TmuxWorkspaceModel
     @State private var showingNewSession = false
-    @State private var newSessionName = "mobile"
+    @State private var newSessionName = ""
     @State private var sessionPendingDelete: TmuxSession?
 
     init(host: Host) {
@@ -25,7 +25,7 @@ struct RemoteSessionListView: View {
 
             if model.sessions.contains(where: { $0.attachedCount > 1 }) {
                 Section {
-                    Label("Another tmux client is attached. Use the dedicated mobile session to avoid size changes.", systemImage: "rectangle.on.rectangle")
+                    Label("Another tmux client is attached. This can make terminal sizing change.", systemImage: "rectangle.on.rectangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }

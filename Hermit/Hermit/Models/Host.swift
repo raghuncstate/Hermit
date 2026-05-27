@@ -44,7 +44,7 @@ struct Host: Codable, Identifiable {
         username: String,
         privateKeyRef: String = "",
         jumpHost: SSHJumpHost? = nil,
-        defaultTmuxSessionName: String = "mobile",
+        defaultTmuxSessionName: String = "0",
         ribbonConfigs: [RibbonConfig] = RibbonConfig.presets,
         createdAt: Date = Date()
     ) {
@@ -78,7 +78,7 @@ struct Host: Codable, Identifiable {
         defaultTmuxSessionName =
             (try? c.decode(String.self, forKey: .defaultTmuxSessionName)) ??
             (try? c.decode(String.self, forKey: .defaultTmuxSession)) ??
-            "mobile"
+            "0"
         createdAt = try c.decode(Date.self, forKey: .createdAt)
 
         // Migrate from single ribbonConfig to ribbonConfigs array
