@@ -76,6 +76,7 @@ struct WindowDetailView: View {
     var initialPaneId: String?
     var initialPaneIndex: Int?
 
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
     @Environment(DataStore.self) private var dataStore
     @Environment(AppNavigator.self) private var navigator
@@ -214,6 +215,15 @@ struct WindowDetailView: View {
         .task(id: liveRefreshID) {
             guard follow, let pane = selectedPane else { return }
             await model.captureLive(pane)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await restoreTerminalAfterActivation() }
+            } else if phase == .background {
+                commandIdleSubmitTask?.cancel()
+                streamedInputText = commandText
+                Task { await model.disconnect() }
+            }
         }
         .sheet(isPresented: $showingVoiceModal) {
             VoiceInputModal(text: $voiceText) { finalText in
@@ -1069,6 +1079,48 @@ struct WindowDetailView: View {
                 windowsBySession: model.windowsBySession,
                 panesByWindow: model.panesByWindow
             )
+        }
+    }
+
+    @MainActor
+    private func restoreTerminalAfterActivation() async {
+        let previousSession = currentSession
+        let previousWindow = currentWindow
+        let previousPaneId = selectedPaneId
+
+        await model.reconnect()
+
+        let restoredSession = model.sessions.first { $0.id == previousSession.id }
+            ?? model.sessions.first { $0.name == previousSession.name }
+            ?? previousSession
+
+        await model.refreshWindows(for: restoredSession)
+
+        let restoredWindow = model.windows(for: restoredSession).first { $0.id == previousWindow.id }
+            ?? model.windows(for: restoredSession).first {
+                $0.name == previousWindow.name && $0.index == previousWindow.index
+            }
+            ?? model.windows(for: restoredSession).first { $0.name == previousWindow.name }
+            ?? previousWindow
+
+        selectedWindowId = restoredWindow.id
+        await model.loadWindow(restoredWindow)
+
+        let restoredPanes = model.panes(for: restoredWindow)
+        let restoredPane = previousPaneId.flatMap { paneId in
+            restoredPanes.first { $0.id == paneId }
+        } ?? model.activePane(for: restoredWindow) ?? restoredPanes.first
+
+        selectedPaneId = restoredPane?.id
+        streamedInputText = commandText
+
+        guard let restoredPane else { return }
+        model.setFollow(restoredPane.id, enabled: follow)
+        if follow {
+            await model.captureLive(restoredPane)
+            requestPaneScroll(.bottom)
+        } else {
+            await model.captureScrollback(restoredPane)
         }
     }
 

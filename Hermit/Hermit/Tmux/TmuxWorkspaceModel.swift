@@ -117,16 +117,21 @@ final class TmuxWorkspaceModel {
         status = .disconnected
     }
 
-    func refreshSessions() async {
-        guard let client else {
-            await connectIfNeeded()
-            guard self.client != nil else { return }
-            await refreshSessions()
-            return
+    @discardableResult
+    private func connectedClient() async -> TmuxControlClient? {
+        if let client {
+            return client
         }
 
+        await reconnect()
+        return client
+    }
+
+    func refreshSessions() async {
         do {
-            var fetched = try await client.listSessions().sorted {
+            var fetched = try await withConnectedClient { client in
+                try await client.listSessions()
+            }.sorted {
                 $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
 
@@ -135,7 +140,9 @@ final class TmuxWorkspaceModel {
 
             for index in fetched.indices {
                 do {
-                    let windows = try await client.listWindows(sessionId: fetched[index].id)
+                    let windows = try await withConnectedClient { client in
+                        try await client.listWindows(sessionId: fetched[index].id)
+                    }
                     fetched[index].windowCount = windows.count
                     windowsBySession[fetched[index].id] = windows.sorted { $0.index < $1.index }
                     if let sessionIndex = sessions.firstIndex(where: { $0.id == fetched[index].id }) {
@@ -154,18 +161,16 @@ final class TmuxWorkspaceModel {
     }
 
     func refreshWindows(for session: TmuxSession) async {
-        guard let client else {
-            await connectIfNeeded()
-            guard self.client != nil else { return }
-            await refreshWindows(for: session)
-            return
-        }
         do {
-            let windows = try await client.listWindows(sessionId: session.id).sorted { $0.index < $1.index }
+            let windows = try await withConnectedClient { client in
+                try await client.listWindows(sessionId: session.id)
+            }.sorted { $0.index < $1.index }
             windowsBySession[session.id] = windows
 
             for window in windows {
-                let panes = try await client.listPanes(windowId: window.id).sorted { $0.index < $1.index }
+                let panes = try await withConnectedClient { client in
+                    try await client.listPanes(windowId: window.id)
+                }.sorted { $0.index < $1.index }
                 panesByWindow[window.id] = panes
             }
         } catch {
@@ -174,9 +179,10 @@ final class TmuxWorkspaceModel {
     }
 
     func loadWindow(_ window: TmuxWindow) async {
-        guard let client else { return }
         do {
-            let panes = try await client.listPanes(windowId: window.id).sorted { $0.index < $1.index }
+            let panes = try await withConnectedClient { client in
+                try await client.listPanes(windowId: window.id)
+            }.sorted { $0.index < $1.index }
             panesByWindow[window.id] = panes
             if let activePane = panes.first(where: \.isActive) ?? panes.first {
                 await captureLive(activePane)
@@ -203,8 +209,6 @@ final class TmuxWorkspaceModel {
     }
 
     private func capture(paneId: String, historyLimit: Int) async {
-        guard let client else { return }
-
         if captureInFlightPaneIds.contains(paneId) {
             queuePendingCapture(paneId: paneId, historyLimit: historyLimit)
             return
@@ -218,7 +222,9 @@ final class TmuxWorkspaceModel {
             nextHistoryLimit = nil
 
             do {
-                let rawText = try await client.capturePane(paneId: paneId, historyLimit: currentHistoryLimit)
+                let rawText = try await withConnectedClient { client in
+                    try await client.capturePane(paneId: paneId, historyLimit: currentHistoryLimit)
+                }
                 let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
 
                 if shouldAcceptCapture(displayText, paneId: paneId, historyLimit: currentHistoryLimit) {
@@ -242,9 +248,10 @@ final class TmuxWorkspaceModel {
     }
 
     func select(_ pane: TmuxPane, in window: TmuxWindow) async {
-        guard let client else { return }
         do {
-            try await client.selectPane(paneId: pane.id)
+            try await withConnectedClient { client in
+                try await client.selectPane(paneId: pane.id)
+            }
             let selectedPaneId = pane.id
             panesByWindow[window.id] = panes(for: window).map {
                 var updatedPane = $0
@@ -275,9 +282,20 @@ final class TmuxWorkspaceModel {
     func send(_ macro: TmuxMacro, to pane: TmuxPane) async {
         do {
             if macro.sendsLiteralText {
-                try await client?.sendText(macro.key, to: pane.id, enter: macro.appendsEnter)
-            } else {
-                try await client?.sendKey(macro.key, to: pane.id)
+                echoInputText(macro.key, to: pane)
+                if macro.appendsEnter {
+                    echoEnter(to: pane)
+                }
+            } else if macro.key == "Enter" {
+                echoEnter(to: pane)
+            }
+
+            try await withConnectedClient { client in
+                if macro.sendsLiteralText {
+                    try await client.sendText(macro.key, to: pane.id, enter: macro.appendsEnter)
+                } else {
+                    try await client.sendKey(macro.key, to: pane.id)
+                }
             }
             await captureAfterInput(pane)
         } catch {
@@ -287,7 +305,10 @@ final class TmuxWorkspaceModel {
 
     func sendCommand(_ command: String, to pane: TmuxPane) async {
         do {
-            try await client?.sendText(command, to: pane.id, enter: true)
+            echoSubmittedCommand(command, to: pane)
+            try await withConnectedClient { client in
+                try await client.sendText(command, to: pane.id, enter: true)
+            }
             await captureAfterInput(pane)
         } catch {
             handle(error)
@@ -297,7 +318,10 @@ final class TmuxWorkspaceModel {
     func sendInputText(_ text: String, to pane: TmuxPane) async {
         guard !text.isEmpty else { return }
         do {
-            try await client?.sendText(text, to: pane.id, enter: false)
+            echoInputText(text, to: pane)
+            try await withConnectedClient { client in
+                try await client.sendText(text, to: pane.id, enter: false)
+            }
             await captureAfterInput(pane)
         } catch {
             handle(error)
@@ -307,7 +331,10 @@ final class TmuxWorkspaceModel {
     func sendBackspace(count: Int, to pane: TmuxPane) async {
         guard count > 0 else { return }
         do {
-            try await client?.sendBackspace(count: count, to: pane.id)
+            echoBackspace(count: count, to: pane)
+            try await withConnectedClient { client in
+                try await client.sendBackspace(count: count, to: pane.id)
+            }
             await captureAfterInput(pane)
         } catch {
             handle(error)
@@ -317,14 +344,22 @@ final class TmuxWorkspaceModel {
     func sendInputDelta(backspaceCount: Int, insertedText: String, enter: Bool, to pane: TmuxPane) async {
         guard backspaceCount > 0 || !insertedText.isEmpty || enter else { return }
         do {
-            if backspaceCount > 0 {
-                try await client?.sendBackspace(count: backspaceCount, to: pane.id)
-            }
-            if !insertedText.isEmpty {
-                try await client?.sendText(insertedText, to: pane.id, enter: false)
-            }
+            echoBackspace(count: backspaceCount, to: pane)
+            echoInputText(insertedText, to: pane)
             if enter {
-                try await client?.sendText("", to: pane.id, enter: true)
+                echoEnter(to: pane)
+            }
+
+            try await withConnectedClient { client in
+                if backspaceCount > 0 {
+                    try await client.sendBackspace(count: backspaceCount, to: pane.id)
+                }
+                if !insertedText.isEmpty {
+                    try await client.sendText(insertedText, to: pane.id, enter: false)
+                }
+                if enter {
+                    try await client.sendText("", to: pane.id, enter: true)
+                }
             }
             await captureAfterInput(pane)
         } catch {
@@ -334,7 +369,10 @@ final class TmuxWorkspaceModel {
 
     func sendEnter(to pane: TmuxPane) async {
         do {
-            try await client?.sendText("", to: pane.id, enter: true)
+            echoEnter(to: pane)
+            try await withConnectedClient { client in
+                try await client.sendText("", to: pane.id, enter: true)
+            }
             await captureAfterInput(pane)
         } catch {
             handle(error)
@@ -378,7 +416,9 @@ final class TmuxWorkspaceModel {
     func newSession(named name: String) async {
         guard !name.isEmpty else { return }
         do {
-            try await client?.newSession(named: name)
+            try await withConnectedClient { client in
+                try await client.newSession(named: name)
+            }
             await refreshSessions()
         } catch {
             handle(error)
@@ -387,7 +427,9 @@ final class TmuxWorkspaceModel {
 
     func killSession(_ session: TmuxSession) async {
         do {
-            try await client?.killSession(sessionId: session.id)
+            try await withConnectedClient { client in
+                try await client.killSession(sessionId: session.id)
+            }
             await refreshSessions()
         } catch {
             handle(error)
@@ -396,7 +438,9 @@ final class TmuxWorkspaceModel {
 
     func newWindow(in session: TmuxSession) async {
         do {
-            try await client?.newWindow(sessionId: session.id)
+            try await withConnectedClient { client in
+                try await client.newWindow(sessionId: session.id)
+            }
             await refreshWindows(for: session)
         } catch {
             handle(error)
@@ -406,7 +450,9 @@ final class TmuxWorkspaceModel {
     func renameWindow(_ window: TmuxWindow, to name: String, in session: TmuxSession) async {
         guard !name.isEmpty else { return }
         do {
-            try await client?.renameWindow(windowId: window.id, name: name)
+            try await withConnectedClient { client in
+                try await client.renameWindow(windowId: window.id, name: name)
+            }
             await refreshWindows(for: session)
         } catch {
             handle(error)
@@ -415,7 +461,9 @@ final class TmuxWorkspaceModel {
 
     func killWindow(_ window: TmuxWindow, in session: TmuxSession) async {
         do {
-            try await client?.killWindow(windowId: window.id)
+            try await withConnectedClient { client in
+                try await client.killWindow(windowId: window.id)
+            }
             await refreshSessions()
             if sessions.contains(where: { $0.id == session.id }) {
                 await refreshWindows(for: session)
@@ -427,7 +475,9 @@ final class TmuxWorkspaceModel {
 
     func moveWindow(_ window: TmuxWindow, by offset: Int, in session: TmuxSession) async {
         do {
-            try await client?.moveWindow(windowId: window.id, by: offset)
+            try await withConnectedClient { client in
+                try await client.moveWindow(windowId: window.id, by: offset)
+            }
             await refreshWindows(for: session)
         } catch {
             handle(error)
@@ -436,7 +486,9 @@ final class TmuxWorkspaceModel {
 
     func selectWindow(_ window: TmuxWindow, in session: TmuxSession) async {
         do {
-            try await client?.selectWindow(windowId: window.id)
+            try await withConnectedClient { client in
+                try await client.selectWindow(windowId: window.id)
+            }
             await refreshWindows(for: session)
             let selectedWindow = windows(for: session).first { $0.id == window.id } ?? window
             await loadWindow(selectedWindow)
@@ -447,7 +499,9 @@ final class TmuxWorkspaceModel {
 
     func split(_ pane: TmuxPane, in window: TmuxWindow, vertical: Bool) async {
         do {
-            try await client?.splitPane(paneId: pane.id, vertical: vertical)
+            try await withConnectedClient { client in
+                try await client.splitPane(paneId: pane.id, vertical: vertical)
+            }
             await refreshWindow(window)
         } catch {
             handle(error)
@@ -456,7 +510,9 @@ final class TmuxWorkspaceModel {
 
     func kill(_ pane: TmuxPane, in window: TmuxWindow) async {
         do {
-            try await client?.killPane(paneId: pane.id)
+            try await withConnectedClient { client in
+                try await client.killPane(paneId: pane.id)
+            }
             await refreshSessions()
             if windowsBySession[window.sessionId]?.contains(where: { $0.id == window.id }) == true {
                 await refreshWindow(window)
@@ -467,14 +523,10 @@ final class TmuxWorkspaceModel {
     }
 
     func refreshWindow(_ window: TmuxWindow) async {
-        guard let client else {
-            await connectIfNeeded()
-            guard self.client != nil else { return }
-            await refreshWindow(window)
-            return
-        }
         do {
-            panesByWindow[window.id] = try await client.listPanes(windowId: window.id).sorted { $0.index < $1.index }
+            panesByWindow[window.id] = try await withConnectedClient { client in
+                try await client.listPanes(windowId: window.id)
+            }.sorted { $0.index < $1.index }
         } catch {
             handle(error)
         }
@@ -485,14 +537,16 @@ final class TmuxWorkspaceModel {
     }
 
     func resizeForDisplay(_ pane: TmuxPane, cols: Int, rows: Int, in window: TmuxWindow) async {
-        guard let client, cols > 0, rows > 0 else { return }
+        guard cols > 0, rows > 0 else { return }
         let singlePaneWindow = panes(for: window).count <= 1
         if singlePaneWindow {
             guard abs(pane.width - cols) > 1 || abs(pane.height - rows) > 1 else { return }
         }
 
         do {
-            try await client.resizeDisplay(windowId: window.id, cols: cols, rows: rows)
+            try await withConnectedClient { client in
+                try await client.resizeDisplay(windowId: window.id, cols: cols, rows: rows)
+            }
             await refreshWindow(window)
             if let resizedPane = panes(for: window).first(where: { $0.id == pane.id }) {
                 await captureLive(resizedPane)
@@ -535,7 +589,9 @@ final class TmuxWorkspaceModel {
             await refreshSessions()
         case .pause(let paneId):
             do {
-                try await client?.continuePaneOutput(paneId: paneId)
+                try await withConnectedClient { client in
+                    try await client.continuePaneOutput(paneId: paneId)
+                }
             } catch {
                 handle(error)
             }
@@ -598,6 +654,40 @@ final class TmuxWorkspaceModel {
     private func stopLivePolling(paneId: String) {
         livePollTasks[paneId]?.cancel()
         livePollTasks[paneId] = nil
+    }
+
+    private func withConnectedClient<T>(
+        _ operation: (TmuxControlClient) async throws -> T
+    ) async throws -> T {
+        guard let currentClient = await connectedClient() else {
+            throw TmuxProtocolError.disconnected
+        }
+
+        do {
+            let result = try await operation(currentClient)
+            errorMessage = nil
+            return result
+        } catch {
+            guard shouldReconnect(after: error) else {
+                throw error
+            }
+
+            markConnectionDropped(error)
+            guard let retryClient = await connectedClient() else {
+                throw error
+            }
+
+            do {
+                let result = try await operation(retryClient)
+                errorMessage = nil
+                return result
+            } catch {
+                if shouldReconnect(after: error) {
+                    markConnectionDropped(error)
+                }
+                throw error
+            }
+        }
     }
 
     private func captureLiveIfFollowed(paneId: String) async {
@@ -750,8 +840,42 @@ final class TmuxWorkspaceModel {
 
     private func handle(_ error: Error) {
         errorMessage = error.localizedDescription
-        if case .connecting = status {
+        if shouldReconnect(after: error) {
+            markConnectionDropped(error)
+        } else if case .connecting = status {
             status = .failed(error.localizedDescription)
         }
+    }
+
+    private func shouldReconnect(after error: Error) -> Bool {
+        if let tmuxError = error as? TmuxProtocolError {
+            switch tmuxError {
+            case .disconnected:
+                return true
+            case .commandFailed, .malformedControlLine:
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private func markConnectionDropped(_ error: Error) {
+        errorMessage = error.localizedDescription
+        if let droppedClient = client {
+            Task { await droppedClient.disconnect() }
+        }
+        client = nil
+        eventTask?.cancel()
+        eventTask = nil
+        outputCaptureTasks.values.forEach { $0.cancel() }
+        outputCaptureTasks.removeAll()
+        livePollTasks.values.forEach { $0.cancel() }
+        livePollTasks.removeAll()
+        captureInFlightPaneIds.removeAll()
+        pendingCaptureHistoryLimits.removeAll()
+        sparseFrameSkipCounts.removeAll()
+        followedPaneIds.removeAll()
+        status = .disconnected
     }
 }
