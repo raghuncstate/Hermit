@@ -18,6 +18,7 @@ actor TmuxControlClient {
     private var waitingForBegin: [CheckedContinuation<String, Error>] = []
     private var pendingCommands: [Int: CheckedContinuation<String, Error>] = [:]
     private var startContinuation: CheckedContinuation<Void, Error>?
+    private var didFinish = false
 
     init(connection: SSHClientConnection) {
         self.connection = connection
@@ -95,6 +96,13 @@ actor TmuxControlClient {
     }
 
     func disconnect() async {
+        if let writer {
+            var buffer = ByteBufferAllocator().buffer(capacity: "detach-client\n".utf8.count)
+            buffer.writeString("detach-client\n")
+            try? await writer.write(buffer)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+
         lifecycleTask?.cancel()
         lifecycleTask = nil
         await connection.close()
@@ -150,6 +158,9 @@ actor TmuxControlClient {
     }
 
     private func finish(error: Error) {
+        guard !didFinish else { return }
+        didFinish = true
+
         writer = nil
         startContinuation?.resume(throwing: error)
         startContinuation = nil

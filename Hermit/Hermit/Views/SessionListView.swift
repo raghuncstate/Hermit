@@ -12,7 +12,6 @@ struct SessionListView: View {
     @State private var showingNewHost = false
     @State private var showingSettings = false
     @State private var navigationPath: [AppRoute] = []
-    @State private var didApplyDebugLaunchRoute = false
 
     private var favoriteShortcutLimit: Int {
         UIDevice.current.userInterfaceIdiom == .phone ? 3 : 12
@@ -59,9 +58,6 @@ struct SessionListView: View {
                 guard let request else { return }
                 navigationPath = [.shortcut(request.shortcut)]
                 navigator.clearShortcutRequest()
-            }
-            .task {
-                applyDebugLaunchRouteIfRequested()
             }
         }
     }
@@ -180,30 +176,6 @@ struct SessionListView: View {
         let target = "\(host.username)@\(host.hostname):\(host.port)"
         guard let jumpHost = host.jumpHost else { return target }
         return "\(target) via \(jumpHost.username)@\(jumpHost.hostname):\(jumpHost.port)"
-    }
-
-    private func applyDebugLaunchRouteIfRequested() {
-        #if DEBUG
-        guard !didApplyDebugLaunchRoute else { return }
-
-        let arguments = Set(ProcessInfo.processInfo.arguments)
-        guard arguments.contains("--hermit-open-first-favorite") ||
-            arguments.contains("--hermit-open-first-host") else {
-            return
-        }
-
-        didApplyDebugLaunchRoute = true
-
-        if arguments.contains("--hermit-open-first-favorite"),
-           let shortcut = dataStore.favoriteTmuxShortcuts(limit: 1, kind: .window).first {
-            navigationPath = [.shortcut(shortcut)]
-            return
-        }
-
-        if let host = dataStore.hosts.sorted(by: { $0.displayName < $1.displayName }).first {
-            navigationPath = [.host(host.id)]
-        }
-        #endif
     }
 }
 
