@@ -13,6 +13,8 @@ final class DataStore {
 
     private static let reverseTunnelMacHostID = UUID(uuidString: "EED9DA12-53C1-489C-B761-3013BDD43355")!
     private static let obsoleteVPNMacHostID = UUID(uuidString: "83540C4C-2633-4C44-936C-EED9AE6F7EDB")!
+    private static let reverseTunnelMacTmuxSocketName = "hermit-mobile"
+    private static let reverseTunnelMacSessionName = "hermit-mobile"
 
     private var fileURL: URL {
         iCloudURL ?? localFileURL
@@ -71,7 +73,8 @@ final class DataStore {
             let backup = try JSONDecoder.hermit.decode(BackupData.self, from: data)
             let migratedHosts = backup.hosts.map { migrateHost($0) }
             let hostsDidChange = zip(backup.hosts, migratedHosts).contains { original, migrated in
-                original.defaultTmuxSessionName != migrated.defaultTmuxSessionName
+                original.defaultTmuxSessionName != migrated.defaultTmuxSessionName ||
+                    original.tmuxSocketName != migrated.tmuxSocketName
             }
             let profileMigration = migrateReverseTunnelProfile(
                 hosts: migratedHosts,
@@ -80,10 +83,12 @@ final class DataStore {
             )
             let knownHostIDs = Set(profileMigration.hosts.map(\.id))
             let raghudtHostIDs = Set(profileMigration.hosts.filter(isKnownRaghudtProfile).map(\.id))
+            let reverseTunnelMacHostIDs = Set(profileMigration.hosts.filter { $0.id == Self.reverseTunnelMacHostID }.map(\.id))
 
             let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
                 knownHostIDs.contains(shortcut.hostID) &&
-                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile")
+                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile") &&
+                    !(reverseTunnelMacHostIDs.contains(shortcut.hostID) && shortcut.sessionName != Self.reverseTunnelMacSessionName)
             }
 
             self.hosts = profileMigration.hosts
@@ -284,6 +289,10 @@ final class DataStore {
         if isKnownRaghudtProfile(host), host.defaultTmuxSessionName == "mobile" {
             host.defaultTmuxSessionName = "0"
         }
+        if host.id == Self.reverseTunnelMacHostID || host.displayName == "This Mac via raghudt" {
+            host.defaultTmuxSessionName = Self.reverseTunnelMacSessionName
+            host.tmuxSocketName = Self.reverseTunnelMacTmuxSocketName
+        }
         // Always sync ribbon configs to current defaults
         // During active development, this ensures all hosts pick up button changes
         host.ribbonConfigs = RibbonConfig.presets
@@ -326,6 +335,13 @@ final class DataStore {
         for index in migratedSessions.indices where obsoleteHostIDs.contains(migratedSessions[index].hostID) {
             migratedSessions[index].hostID = Self.reverseTunnelMacHostID
             didChange = true
+        }
+        for index in migratedSessions.indices where migratedSessions[index].hostID == Self.reverseTunnelMacHostID {
+            if migratedSessions[index].tmuxSessionName != nil &&
+                migratedSessions[index].tmuxSessionName != Self.reverseTunnelMacSessionName {
+                migratedSessions[index].tmuxSessionName = Self.reverseTunnelMacSessionName
+                didChange = true
+            }
         }
 
         var migratedShortcuts = shortcuts
@@ -399,7 +415,8 @@ final class DataStore {
                 username: "raghupathyk",
                 privateKeyRef: sourceHost.privateKeyRef
             ),
-            defaultTmuxSessionName: sourceHost.defaultTmuxSessionName,
+            defaultTmuxSessionName: Self.reverseTunnelMacSessionName,
+            tmuxSocketName: Self.reverseTunnelMacTmuxSocketName,
             ribbonConfigs: sourceHost.ribbonConfigs,
             createdAt: sourceHost.createdAt
         )
@@ -412,7 +429,8 @@ final class DataStore {
             lhs.username == rhs.username &&
             lhs.privateKeyRef == rhs.privateKeyRef &&
             lhs.jumpHost == rhs.jumpHost &&
-            lhs.defaultTmuxSessionName == rhs.defaultTmuxSessionName
+            lhs.defaultTmuxSessionName == rhs.defaultTmuxSessionName &&
+            lhs.tmuxSocketName == rhs.tmuxSocketName
     }
 
     private func createFileIfNeeded() {

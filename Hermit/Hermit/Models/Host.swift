@@ -28,6 +28,7 @@ struct Host: Codable, Identifiable {
     var privateKeyRef: String
     var jumpHost: SSHJumpHost?
     var defaultTmuxSessionName: String
+    var tmuxSocketName: String?
     var ribbonConfigs: [RibbonConfig]
     var createdAt: Date
 
@@ -45,6 +46,7 @@ struct Host: Codable, Identifiable {
         privateKeyRef: String = "",
         jumpHost: SSHJumpHost? = nil,
         defaultTmuxSessionName: String = "0",
+        tmuxSocketName: String? = nil,
         ribbonConfigs: [RibbonConfig] = RibbonConfig.presets,
         createdAt: Date = Date()
     ) {
@@ -56,13 +58,14 @@ struct Host: Codable, Identifiable {
         self.privateKeyRef = privateKeyRef
         self.jumpHost = jumpHost
         self.defaultTmuxSessionName = defaultTmuxSessionName
+        self.tmuxSocketName = Self.normalizedTmuxSocketName(tmuxSocketName)
         self.ribbonConfigs = ribbonConfigs
         self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
         case id, displayName, hostname, port, username, privateKeyRef, jumpHost
-        case defaultTmuxSessionName, defaultTmuxSession
+        case defaultTmuxSessionName, defaultTmuxSession, tmuxSocketName
         case ribbonConfigs, ribbonConfig, createdAt
     }
 
@@ -79,6 +82,7 @@ struct Host: Codable, Identifiable {
             (try? c.decode(String.self, forKey: .defaultTmuxSessionName)) ??
             (try? c.decode(String.self, forKey: .defaultTmuxSession)) ??
             "0"
+        tmuxSocketName = Self.normalizedTmuxSocketName(try? c.decode(String.self, forKey: .tmuxSocketName))
         createdAt = try c.decode(Date.self, forKey: .createdAt)
 
         // Migrate from single ribbonConfig to ribbonConfigs array
@@ -101,8 +105,15 @@ struct Host: Codable, Identifiable {
         try c.encode(privateKeyRef, forKey: .privateKeyRef)
         try c.encodeIfPresent(jumpHost, forKey: .jumpHost)
         try c.encode(defaultTmuxSessionName, forKey: .defaultTmuxSessionName)
+        try c.encodeIfPresent(tmuxSocketName, forKey: .tmuxSocketName)
         try c.encode(ribbonConfigs, forKey: .ribbonConfigs)
         try c.encode(createdAt, forKey: .createdAt)
+    }
+
+    private static func normalizedTmuxSocketName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

@@ -47,7 +47,7 @@ final class SSHConnectionManager {
 
             let command: String
             if let tmux = tmuxSessionName {
-                command = "tmux new-session -As \(tmux)"
+                command = TmuxLaunchCommand.interactive(sessionName: tmux, socketName: host.tmuxSocketName)
             } else {
                 command = ""
             }

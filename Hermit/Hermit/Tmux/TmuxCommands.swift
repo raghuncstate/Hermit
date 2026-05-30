@@ -6,6 +6,29 @@ enum TmuxCommandQuoter {
     }
 }
 
+enum TmuxLaunchCommand {
+    static func controlMode(sessionName: String, socketName: String?) -> String {
+        "\(tmuxCommand(socketName: socketName)) -CC new-session -A -s \(TmuxCommandQuoter.quote(sessionName))"
+    }
+
+    static func interactive(sessionName: String, socketName: String?) -> String {
+        "\(tmuxCommand(socketName: socketName)) new-session -As \(TmuxCommandQuoter.quote(sessionName))"
+    }
+
+    private static func tmuxCommand(socketName: String?) -> String {
+        guard let socketName = normalizedSocketName(socketName) else {
+            return "tmux"
+        }
+        return "tmux -L \(TmuxCommandQuoter.quote(socketName))"
+    }
+
+    private static func normalizedSocketName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 extension TmuxControlClient {
     func listSessions() async throws -> [TmuxSession] {
         let output = try await send("list-sessions -F '#{session_id}|#{session_name}|#{session_attached}|#{session_activity}'")

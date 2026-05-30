@@ -49,6 +49,17 @@ final class TmuxProtocolParserTests: XCTestCase {
         XCTAssertEqual(String(decoding: data, as: UTF8.self), "ls /\r\nbackslash=\\")
     }
 
+    func testLaunchCommandUsesDedicatedSocketWhenConfigured() {
+        XCTAssertEqual(
+            TmuxLaunchCommand.controlMode(sessionName: "hermit-mobile", socketName: "hermit-mobile"),
+            "tmux -L 'hermit-mobile' -CC new-session -A -s 'hermit-mobile'"
+        )
+        XCTAssertEqual(
+            TmuxLaunchCommand.interactive(sessionName: "0", socketName: nil),
+            "tmux new-session -As '0'"
+        )
+    }
+
     func testParsesOutputEventsAcrossChunks() {
         var parser = TmuxProtocolParser()
         let first = parser.append(Data("%output %12 hel".utf8))

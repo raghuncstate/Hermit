@@ -27,6 +27,23 @@ struct ModelTests {
         #expect(decoded.jumpHost == host.jumpHost)
     }
 
+    @Test func hostRoundTripsTmuxSocketName() throws {
+        let host = Host(
+            displayName: "Hermit Mac",
+            hostname: "127.0.0.1",
+            port: 22220,
+            username: "raghu",
+            defaultTmuxSessionName: "hermit-mobile",
+            tmuxSocketName: " hermit-mobile "
+        )
+
+        let data = try JSONEncoder.hermit.encode(host)
+        let decoded = try JSONDecoder.hermit.decode(Host.self, from: data)
+
+        #expect(decoded.defaultTmuxSessionName == "hermit-mobile")
+        #expect(decoded.tmuxSocketName == "hermit-mobile")
+    }
+
     @Test func sessionRoundTrip() throws {
         let session = Session(
             displayName: "claude-session",
