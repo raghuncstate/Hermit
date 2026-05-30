@@ -69,6 +69,7 @@ final class TmuxWorkspaceModel {
     private var pendingCaptureHistoryLimits: [String: Int] = [:]
     private var sparseFrameSkipCounts: [String: Int] = [:]
     private var pendingLocalEchoByPane: [String: PendingLocalEcho] = [:]
+    private var connectionGeneration = 0
 
     init(host: Host) {
         self.host = host
@@ -80,7 +81,10 @@ final class TmuxWorkspaceModel {
     }
 
     func reconnect() async {
-        await disconnect()
+        let generation = nextConnectionGeneration()
+        await closeCurrentConnection()
+        guard isCurrentConnectionGeneration(generation) else { return }
+
         status = .connecting
         errorMessage = nil
 
@@ -89,22 +93,32 @@ final class TmuxWorkspaceModel {
                 host: host,
                 sessionName: host.defaultTmuxSessionName
             )
+            guard isCurrentConnectionGeneration(generation) else {
+                await controlClient.disconnect()
+                return
+            }
             client = controlClient
             status = .connected
-            startEventPump(controlClient)
+            startEventPump(controlClient, generation: generation)
             await refreshSessions()
         } catch {
+            guard isCurrentConnectionGeneration(generation) else { return }
             status = .failed(error.localizedDescription)
             errorMessage = error.localizedDescription
         }
     }
 
     func disconnect() async {
+        let generation = nextConnectionGeneration()
+        await closeCurrentConnection()
+        guard isCurrentConnectionGeneration(generation) else { return }
+        status = .disconnected
+    }
+
+    private func closeCurrentConnection() async {
         eventTask?.cancel()
         eventTask = nil
-        if let client {
-            await client.disconnect()
-        }
+        let existingClient = client
         client = nil
         outputCaptureTasks.values.forEach { $0.cancel() }
         outputCaptureTasks.removeAll()
@@ -114,7 +128,18 @@ final class TmuxWorkspaceModel {
         pendingCaptureHistoryLimits.removeAll()
         sparseFrameSkipCounts.removeAll()
         pendingLocalEchoByPane.removeAll()
-        status = .disconnected
+        if let existingClient {
+            await existingClient.disconnect()
+        }
+    }
+
+    private func nextConnectionGeneration() -> Int {
+        connectionGeneration += 1
+        return connectionGeneration
+    }
+
+    private func isCurrentConnectionGeneration(_ generation: Int) -> Bool {
+        generation == connectionGeneration
     }
 
     @discardableResult
@@ -570,16 +595,21 @@ final class TmuxWorkspaceModel {
         panes(for: window).first(where: \.isActive) ?? panes(for: window).first
     }
 
-    private func startEventPump(_ controlClient: TmuxControlClient) {
+    private func startEventPump(_ controlClient: TmuxControlClient, generation: Int) {
         eventTask?.cancel()
         eventTask = Task { [weak self] in
             for await event in controlClient.events {
-                await self?.handle(event)
+                guard self?.isCurrentConnectionGeneration(generation) == true else {
+                    return
+                }
+                await self?.handle(event, generation: generation)
             }
         }
     }
 
-    private func handle(_ event: TmuxControlEvent) async {
+    private func handle(_ event: TmuxControlEvent, generation: Int) async {
+        guard isCurrentConnectionGeneration(generation) else { return }
+
         switch event {
         case .output(let paneId, _), .extendedOutput(let paneId, _, _):
             scheduleOutputCapture(paneId: paneId)
@@ -601,6 +631,7 @@ final class TmuxWorkspaceModel {
         case .sessionChanged, .paneModeChanged:
             break
         case .exit:
+            guard isCurrentConnectionGeneration(generation) else { return }
             status = .disconnected
             client = nil
             outputCaptureTasks.values.forEach { $0.cancel() }
@@ -861,6 +892,7 @@ final class TmuxWorkspaceModel {
     }
 
     private func markConnectionDropped(_ error: Error) {
+        _ = nextConnectionGeneration()
         errorMessage = error.localizedDescription
         if let droppedClient = client {
             Task { await droppedClient.disconnect() }

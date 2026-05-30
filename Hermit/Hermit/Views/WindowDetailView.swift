@@ -5,6 +5,7 @@ struct WindowDetailView: View {
     private enum PaneScrollAction: Equatable {
         case top
         case bottom
+        case bottomLeading
     }
 
     private enum WindowSwitcherScope: String, CaseIterable, Identifiable {
@@ -20,48 +21,11 @@ struct WindowDetailView: View {
     }
 
     private struct KillRequest: Identifiable {
-        enum Target {
-            case pane(TmuxPane, TmuxWindow)
-            case window(TmuxWindow)
-        }
-
-        var target: Target
-
-        var id: String {
-            switch target {
-            case .pane(let pane, let window):
-                "pane-\(window.id)-\(pane.id)"
-            case .window(let window):
-                "window-\(window.id)"
-            }
-        }
-
-        var title: String {
-            switch target {
-            case .pane:
-                "Kill Pane?"
-            case .window:
-                "Kill Window?"
-            }
-        }
-
-        var destructiveLabel: String {
-            switch target {
-            case .pane:
-                "Kill Pane"
-            case .window:
-                "Kill Window"
-            }
-        }
-
-        var message: String {
-            switch target {
-            case .pane(let pane, let window):
-                "Pane #\(pane.index) in \(window.name) running \(pane.currentCommand)."
-            case .window(let window):
-                "Window #\(window.index) \(window.name)."
-            }
-        }
+        var window: TmuxWindow
+        var id: String { "window-\(window.id)" }
+        var title: String { "Kill Window?" }
+        var destructiveLabel: String { "Kill Window" }
+        var message: String { "Window #\(window.index) \(window.name)." }
     }
 
     private static let minimumTerminalFontSize: CGFloat = 8
@@ -97,6 +61,7 @@ struct WindowDetailView: View {
     @State private var scrollRequest = PaneScrollRequest(action: .bottom, token: 0)
     @State private var terminalViewportWidth: CGFloat = 0
     @State private var scrollbackLoadedPaneIds: Set<String> = []
+    @State private var activationRefreshTask: Task<Void, Never>?
 
     private var allKnownWindows: [TmuxWindow] {
         let loadedWindows = model.sessions.flatMap { model.windows(for: $0) }
@@ -171,16 +136,12 @@ struct WindowDetailView: View {
                 }
                 .accessibilityLabel("Favorite Window")
 
-                if let pane = selectedPane {
-                    let request = killRequestForSelectedTarget(pane)
-                    Button {
-                        killRequest = request
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .tint(.red)
-                    .accessibilityLabel(request.destructiveLabel)
+                Button {
+                    fitTerminalToScreen()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
+                .accessibilityLabel("Fit to Screen")
 
                 terminalFontMenu
 
@@ -217,13 +178,11 @@ struct WindowDetailView: View {
             await model.captureLive(pane)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
-                Task { await restoreTerminalAfterActivation() }
-            } else if phase == .background {
-                commandIdleSubmitTask?.cancel()
-                streamedInputText = commandText
-                Task { await model.disconnect() }
-            }
+            handleScenePhaseChange(phase)
+        }
+        .onDisappear {
+            activationRefreshTask?.cancel()
+            commandIdleSubmitTask?.cancel()
         }
         .sheet(isPresented: $showingVoiceModal) {
             VoiceInputModal(text: $voiceText) { finalText in
@@ -249,7 +208,7 @@ struct WindowDetailView: View {
             presenting: killRequest
         ) { request in
             Button(request.destructiveLabel, role: .destructive) {
-                performKill(request)
+                killWindow(request.window)
                 killRequest = nil
             }
             Button("Cancel", role: .cancel) {
@@ -335,7 +294,7 @@ struct WindowDetailView: View {
                 .padding(.vertical, 1)
             }
 
-            if let pane = selectedPane {
+            if selectedPane != nil {
                 Button {
                     requestPaneScroll(.top)
                 } label: {
@@ -355,40 +314,6 @@ struct WindowDetailView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
                 .accessibilityLabel("Go to Bottom")
-
-                let request = killRequestForSelectedTarget(pane)
-                Button(role: .destructive) {
-                    killRequest = request
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle)
-                .tint(.red)
-                .accessibilityLabel(request.destructiveLabel)
-
-                Menu {
-                    Button {
-                        Task { await model.split(pane, in: currentWindow, vertical: false) }
-                    } label: {
-                        Label("Split Horizontal", systemImage: "rectangle.split.2x1")
-                    }
-                    Button {
-                        Task { await model.split(pane, in: currentWindow, vertical: true) }
-                    } label: {
-                        Label("Split Vertical", systemImage: "rectangle.split.1x2")
-                    }
-                    Button(role: .destructive) {
-                        killRequest = KillRequest(target: .pane(pane, currentWindow))
-                    } label: {
-                        Label("Kill Pane", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 30, height: 30)
-                }
-                .accessibilityLabel("Pane Actions")
             }
         }
         .frame(height: 38)
@@ -458,7 +383,7 @@ struct WindowDetailView: View {
             .frame(minHeight: 320)
         }
         .refreshable {
-            await refreshSelectedPane()
+            await refreshSelectedPane(forceReconnect: true)
         }
     }
 
@@ -484,7 +409,7 @@ struct WindowDetailView: View {
                 },
                 onRefresh: { finish in
                     Task { @MainActor in
-                        await refreshSelectedPane()
+                        await refreshSelectedPane(forceReconnect: true)
                         finish()
                     }
                 }
@@ -684,7 +609,7 @@ struct WindowDetailView: View {
             .accessibilityLabel(dataStore.isFavorite(windowShortcut(tmuxWindow, session: tmuxSession)) ? "Unfavorite \(tmuxWindow.name)" : "Favorite \(tmuxWindow.name)")
 
             Button(role: .destructive) {
-                killRequest = KillRequest(target: .window(tmuxWindow))
+                killRequest = KillRequest(window: tmuxWindow)
             } label: {
                 Image(systemName: "trash")
                     .foregroundStyle(.red)
@@ -958,37 +883,6 @@ struct WindowDetailView: View {
         }
     }
 
-    private func killPane(_ pane: TmuxPane, in tmuxWindow: TmuxWindow) {
-        let targetSession = session(for: tmuxWindow)
-        Task { @MainActor in
-            let windowPanes = model.panes(for: tmuxWindow)
-            if windowPanes.count <= 1 {
-                await model.killWindow(tmuxWindow, in: targetSession)
-            } else {
-                await model.kill(pane, in: tmuxWindow)
-            }
-            await model.refreshSessions()
-            if model.sessions.contains(where: { $0.id == targetSession.id }) {
-                await model.refreshWindows(for: targetSession)
-            }
-            if selectedPaneId == pane.id {
-                selectedPaneId = model.activePane(for: currentWindow)?.id
-            }
-            if selectedWindowId == tmuxWindow.id,
-               !allKnownWindows.contains(where: { $0.id == tmuxWindow.id }) {
-                selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
-                selectedPaneId = nil
-            }
-        }
-    }
-
-    private func killRequestForSelectedTarget(_ pane: TmuxPane) -> KillRequest {
-        if panes.count <= 1 {
-            return KillRequest(target: .window(currentWindow))
-        }
-        return KillRequest(target: .pane(pane, currentWindow))
-    }
-
     private func killWindow(_ tmuxWindow: TmuxWindow) {
         let targetSession = session(for: tmuxWindow)
         Task { @MainActor in
@@ -1001,15 +895,6 @@ struct WindowDetailView: View {
                 selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
                 selectedPaneId = nil
             }
-        }
-    }
-
-    private func performKill(_ request: KillRequest) {
-        switch request.target {
-        case .pane(let pane, let window):
-            killPane(pane, in: window)
-        case .window(let window):
-            killWindow(window)
         }
     }
 
@@ -1082,8 +967,29 @@ struct WindowDetailView: View {
         }
     }
 
+    private func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            activationRefreshTask?.cancel()
+            activationRefreshTask = Task { @MainActor in
+                await restoreTerminalAfterActivation(forceFollow: true)
+            }
+        case .background:
+            activationRefreshTask?.cancel()
+            commandIdleSubmitTask?.cancel()
+            streamedInputText = commandText
+            Task { @MainActor in
+                await model.disconnect()
+            }
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
     @MainActor
-    private func restoreTerminalAfterActivation() async {
+    private func restoreTerminalAfterActivation(forceFollow: Bool) async {
         let previousSession = currentSession
         let previousWindow = currentWindow
         let previousPaneId = selectedPaneId
@@ -1115,16 +1021,24 @@ struct WindowDetailView: View {
         streamedInputText = commandText
 
         guard let restoredPane else { return }
+        if forceFollow {
+            follow = true
+        }
         model.setFollow(restoredPane.id, enabled: follow)
         if follow {
             await model.captureLive(restoredPane)
-            requestPaneScroll(.bottom)
+            requestPaneScroll(.bottomLeading)
         } else {
             await model.captureScrollback(restoredPane)
         }
     }
 
-    private func refreshSelectedPane() async {
+    private func refreshSelectedPane(forceReconnect: Bool = false) async {
+        if forceReconnect {
+            await restoreTerminalAfterActivation(forceFollow: true)
+            return
+        }
+
         let previousPaneId = selectedPane?.id
         await model.refreshWindow(currentWindow)
 
@@ -1149,15 +1063,15 @@ struct WindowDetailView: View {
     }
 
     private func requestPaneScroll(_ action: PaneScrollAction) {
-        follow = action == .bottom
+        follow = action != .top
         if let pane = selectedPane {
             model.setFollow(pane.id, enabled: follow)
-            if action == .bottom {
+            if action != .top {
                 scrollbackLoadedPaneIds.remove(pane.id)
             }
         }
 
-        if action == .bottom {
+        if action != .top {
             scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
             return
         }
@@ -1197,6 +1111,7 @@ struct WindowDetailView: View {
         let columnCount = max(1, selectedPaneColumnCountForFit())
         let fittedSize = usableWidth / (CGFloat(columnCount) * Self.terminalCharacterWidthRatio)
         setTerminalFontSize(fittedSize)
+        requestPaneScroll(.bottomLeading)
     }
 
     private func setTerminalFontSize(_ size: CGFloat) {
@@ -1238,8 +1153,7 @@ struct WindowDetailView: View {
 
     private func selectedPaneColumnCountForFit() -> Int {
         guard let pane = selectedPane else { return 80 }
-        let snapshotWidth = model.snapshotsByPane[pane.id].map { longestLineLength(in: $0) } ?? 0
-        return max(pane.width, snapshotWidth)
+        return max(24, pane.width)
     }
 
     private func longestLineLength(in snapshot: TmuxPaneSnapshot) -> Int {
@@ -1358,6 +1272,8 @@ struct WindowDetailView: View {
                     context.coordinator.scrollToTop(textView)
                 case .bottom:
                     context.coordinator.scrollToBottom(textView)
+                case .bottomLeading:
+                    context.coordinator.scrollToBottomLeading(textView)
                 }
             } else {
                 context.coordinator.updateScrollableWidth(clampedContentWidth, in: textView)
@@ -1596,12 +1512,19 @@ struct WindowDetailView: View {
 
             func scrollToTop(_ textView: UITextView) {
                 let minY = -textView.adjustedContentInset.top
-                restore(offset: CGPoint(x: textView.contentOffset.x, y: minY), in: textView)
+                let minX = -textView.adjustedContentInset.left
+                restore(offset: CGPoint(x: minX, y: minY), in: textView)
             }
 
             func scrollToBottom(_ textView: UITextView) {
                 let maxY = bottomOffset(for: textView)
                 restore(offset: CGPoint(x: textView.contentOffset.x, y: maxY), in: textView)
+            }
+
+            func scrollToBottomLeading(_ textView: UITextView) {
+                let minX = -textView.adjustedContentInset.left
+                let maxY = bottomOffset(for: textView)
+                restore(offset: CGPoint(x: minX, y: maxY), in: textView)
             }
 
             private func isNearBottom(_ scrollView: UIScrollView, tolerance: CGFloat) -> Bool {
