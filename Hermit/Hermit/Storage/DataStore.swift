@@ -13,8 +13,8 @@ final class DataStore {
 
     private static let reverseTunnelMacHostID = UUID(uuidString: "EED9DA12-53C1-489C-B761-3013BDD43355")!
     private static let obsoleteVPNMacHostID = UUID(uuidString: "83540C4C-2633-4C44-936C-EED9AE6F7EDB")!
-    private static let reverseTunnelMacTmuxSocketName = "hermit-mobile"
-    private static let reverseTunnelMacSessionName = "hermit-mobile"
+    private static let reverseTunnelMacTmuxSocketName: String? = nil
+    private static let reverseTunnelMacSessionName = "0"
 
     private var fileURL: URL {
         iCloudURL ?? localFileURL
@@ -83,12 +83,10 @@ final class DataStore {
             )
             let knownHostIDs = Set(profileMigration.hosts.map(\.id))
             let raghudtHostIDs = Set(profileMigration.hosts.filter(isKnownRaghudtProfile).map(\.id))
-            let reverseTunnelMacHostIDs = Set(profileMigration.hosts.filter { $0.id == Self.reverseTunnelMacHostID }.map(\.id))
 
             let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
                 knownHostIDs.contains(shortcut.hostID) &&
-                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile") &&
-                    !(reverseTunnelMacHostIDs.contains(shortcut.hostID) && shortcut.sessionName != Self.reverseTunnelMacSessionName)
+                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile")
             }
 
             self.hosts = profileMigration.hosts
@@ -335,13 +333,6 @@ final class DataStore {
         for index in migratedSessions.indices where obsoleteHostIDs.contains(migratedSessions[index].hostID) {
             migratedSessions[index].hostID = Self.reverseTunnelMacHostID
             didChange = true
-        }
-        for index in migratedSessions.indices where migratedSessions[index].hostID == Self.reverseTunnelMacHostID {
-            if migratedSessions[index].tmuxSessionName != nil &&
-                migratedSessions[index].tmuxSessionName != Self.reverseTunnelMacSessionName {
-                migratedSessions[index].tmuxSessionName = Self.reverseTunnelMacSessionName
-                didChange = true
-            }
         }
 
         var migratedShortcuts = shortcuts
