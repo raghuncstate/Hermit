@@ -1240,7 +1240,7 @@ struct WindowDetailView: View {
 
             if contentChanged {
                 context.coordinator.apply(
-                    Self.attributedText(from: displayText, fontSize: fontSize),
+                    Self.attributedText(from: snapshot, displayText: displayText, fontSize: fontSize),
                     to: textView
                 )
                 textView.isSelectable = true
@@ -1290,19 +1290,33 @@ struct WindowDetailView: View {
             return plainText
         }
 
-        private static func attributedText(from plainText: String, fontSize: CGFloat) -> NSAttributedString {
-            let output = NSMutableAttributedString(string: plainText)
-            let baseFont = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        private static func attributedText(
+            from snapshot: TmuxPaneSnapshot,
+            displayText: String,
+            fontSize: CGFloat
+        ) -> NSAttributedString {
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.lineBreakMode = .byClipping
             paragraphStyle.lineSpacing = 2
+            let output = AnsiAttributedStringParser.attributedText(
+                snapshot.rawText.isEmpty ? displayText : snapshot.rawText,
+                fontSize: fontSize,
+                paragraphStyle: paragraphStyle
+            )
 
             let fullRange = NSRange(location: 0, length: output.length)
-            output.addAttributes([
-                .font: baseFont,
-                .foregroundColor: UIColor.label,
-                .paragraphStyle: paragraphStyle,
-            ], range: fullRange)
+            if output.length == 0, !displayText.isEmpty {
+                output.append(NSMutableAttributedString(
+                    string: displayText,
+                    attributes: [
+                        .font: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
+                        .foregroundColor: UIColor.label,
+                        .paragraphStyle: paragraphStyle,
+                    ]
+                ))
+            } else {
+                output.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+            }
             addDetectedLinks(to: output)
             return output
         }

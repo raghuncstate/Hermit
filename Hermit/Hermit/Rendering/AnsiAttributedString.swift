@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct AnsiLine: Identifiable {
     let id = UUID()
@@ -24,6 +27,51 @@ struct AnsiAttributedStringParser {
     static func plainText(_ input: String) -> String {
         String(parse(input).characters)
     }
+
+#if canImport(UIKit)
+    static func attributedText(
+        _ input: String,
+        fontSize: CGFloat,
+        paragraphStyle: NSParagraphStyle
+    ) -> NSMutableAttributedString {
+        let baseFont = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let output = NSMutableAttributedString()
+        var style = Style()
+        var plainBuffer = ""
+        var index = input.startIndex
+
+        func flushPlainBuffer() {
+            guard !plainBuffer.isEmpty else { return }
+            output.append(NSAttributedString(
+                string: plainBuffer,
+                attributes: uiAttributes(for: style, baseFont: baseFont, paragraphStyle: paragraphStyle)
+            ))
+            plainBuffer = ""
+        }
+
+        while index < input.endIndex {
+            if input[index] == "\u{1B}" {
+                let next = input.index(after: index)
+                if next < input.endIndex, input[next] == "[" {
+                    if let sequence = csiSequence(in: input, startingAt: index) {
+                        flushPlainBuffer()
+                        if sequence.final == "m" {
+                            applySGR(sequence.parameters, to: &style)
+                        }
+                        index = sequence.endIndex
+                        continue
+                    }
+                }
+            }
+
+            plainBuffer.append(input[index])
+            index = input.index(after: index)
+        }
+
+        flushPlainBuffer()
+        return output
+    }
+#endif
 
     static func parse(_ input: String) -> AttributedString {
         var output = AttributedString()
@@ -77,6 +125,28 @@ struct AnsiAttributedStringParser {
         return output
     }
 
+    private static func csiSequence(
+        in input: String,
+        startingAt escapeIndex: String.Index
+    ) -> (parameters: String, final: Character, endIndex: String.Index)? {
+        let bracketIndex = input.index(after: escapeIndex)
+        guard bracketIndex < input.endIndex, input[bracketIndex] == "[" else { return nil }
+
+        var cursor = input.index(after: bracketIndex)
+        var parameters = ""
+        while cursor < input.endIndex {
+            let char = input[cursor]
+            if let scalar = char.unicodeScalars.first,
+               scalar.value >= 0x40,
+               scalar.value <= 0x7E {
+                return (parameters, char, input.index(after: cursor))
+            }
+            parameters.append(char)
+            cursor = input.index(after: cursor)
+        }
+        return nil
+    }
+
     private static func apply(_ style: Style, to string: inout AttributedString) {
         if let foreground = style.foreground {
             string.foregroundColor = foreground
@@ -99,8 +169,47 @@ struct AnsiAttributedStringParser {
         }
     }
 
+#if canImport(UIKit)
+    private static func uiAttributes(
+        for style: Style,
+        baseFont: UIFont,
+        paragraphStyle: NSParagraphStyle
+    ) -> [NSAttributedString.Key: Any] {
+        var font = baseFont
+        if style.bold || style.italic {
+            var traits: UIFontDescriptor.SymbolicTraits = []
+            if style.bold {
+                traits.insert(.traitBold)
+            }
+            if style.italic {
+                traits.insert(.traitItalic)
+            }
+            if let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits) {
+                font = UIFont(descriptor: descriptor, size: baseFont.pointSize)
+            }
+        }
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: style.foreground.map(UIColor.init) ?? UIColor.label,
+            .paragraphStyle: paragraphStyle,
+        ]
+        if let background = style.background {
+            attributes[.backgroundColor] = UIColor(background)
+        }
+        if style.underline {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
+        return attributes
+    }
+#endif
+
     private static func applySGR(_ code: String, to style: inout Style) {
-        let values = code.isEmpty ? [0] : code.split(separator: ";", omittingEmptySubsequences: false).map { Int($0) ?? 0 }
+        let values = code.isEmpty ? [0] : code.split(
+            maxSplits: Int.max,
+            omittingEmptySubsequences: false,
+            whereSeparator: { $0 == ";" || $0 == ":" }
+        ).map { Int($0) ?? 0 }
         var index = 0
 
         while index < values.count {
