@@ -12,6 +12,8 @@ struct SessionListView: View {
     @State private var showingNewHost = false
     @State private var showingSettings = false
     @State private var navigationPath: [AppRoute] = []
+    @State private var didRefreshShortcuts = false
+    @State private var isRefreshingShortcuts = false
 
     private var favoriteShortcutLimit: Int {
         UIDevice.current.userInterfaceIdiom == .phone ? 3 : 12
@@ -109,7 +111,58 @@ struct SessionListView: View {
         }
         .refreshable {
             dataStore.load()
+            await refreshShortcutIndexes(force: true)
         }
+        .task {
+            await refreshShortcutIndexes(force: false)
+        }
+    }
+
+    @MainActor
+    private func refreshShortcutIndexes(force: Bool) async {
+        if !force && didRefreshShortcuts { return }
+        didRefreshShortcuts = true
+
+        guard !isRefreshingShortcuts else { return }
+        let shortcutHostIDs = Set(dataStore.tmuxShortcuts.map(\.hostID))
+        guard !shortcutHostIDs.isEmpty else { return }
+
+        let hostsWithShortcuts = dataStore.hosts.filter { shortcutHostIDs.contains($0.id) }
+        guard !hostsWithShortcuts.isEmpty else { return }
+
+        isRefreshingShortcuts = true
+        for host in hostsWithShortcuts {
+            await reconcileShortcuts(for: host)
+        }
+        isRefreshingShortcuts = false
+    }
+
+    @MainActor
+    private func reconcileShortcuts(for host: Host) async {
+        let model = TmuxWorkspaceModel(host: host)
+        await model.connectIfNeeded()
+
+        guard model.status == .connected else {
+            await model.disconnect()
+            return
+        }
+
+        await model.refreshSessions()
+
+        if dataStore.tmuxShortcuts.contains(where: { $0.hostID == host.id && $0.kind == .pane }) {
+            for session in model.sessions {
+                await model.refreshWindows(for: session)
+            }
+        }
+
+        dataStore.reconcileTmuxShortcuts(
+            for: host,
+            sessions: model.sessions,
+            windowsBySession: model.windowsBySession,
+            panesByWindow: model.panesByWindow
+        )
+
+        await model.disconnect()
     }
 
     @ViewBuilder

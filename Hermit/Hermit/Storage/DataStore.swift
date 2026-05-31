@@ -86,7 +86,7 @@ final class DataStore {
 
             let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
                 knownHostIDs.contains(shortcut.hostID) &&
-                    !(raghudtHostIDs.contains(shortcut.hostID) && shortcut.sessionName == "mobile")
+                    !isObsoleteShortcut(shortcut, raghudtHostIDs: raghudtHostIDs)
             }
 
             self.hosts = profileMigration.hosts
@@ -240,18 +240,67 @@ final class DataStore {
         windowsBySession: [String: [TmuxWindow]],
         panesByWindow: [String: [TmuxPane]]
     ) {
-        let originalCount = tmuxShortcuts.count
-        tmuxShortcuts.removeAll { shortcut in
-            guard shortcut.hostID == host.id else { return false }
-            guard let session = sessions.first(where: shortcut.matches(session:)) else { return true }
-            guard let window = windowsBySession[session.id]?.first(where: shortcut.matches(window:)) else { return true }
+        var reconciled: [TmuxShortcut] = []
+        var didChange = false
 
-            guard shortcut.kind == .pane else { return false }
-            guard let panes = panesByWindow[window.id], !panes.isEmpty else { return false }
-            return !panes.contains(where: shortcut.matches(pane:))
+        for shortcut in tmuxShortcuts {
+            guard shortcut.hostID == host.id else {
+                reconciled.append(shortcut)
+                continue
+            }
+
+            guard !isObsoleteShortcut(shortcut, raghudtHostIDs: []) else {
+                didChange = true
+                continue
+            }
+
+            guard let session = sessions.first(where: shortcut.matches(session:)),
+                  let windows = windowsBySession[session.id],
+                  let window = windows.first(where: shortcut.matches(window:)) else {
+                didChange = true
+                continue
+            }
+
+            var updated = shortcut
+            switch shortcut.kind {
+            case .window:
+                updated.updateMetadata(from: TmuxShortcut(
+                    kind: .window,
+                    host: host,
+                    session: session,
+                    window: window
+                ))
+            case .pane:
+                guard let panes = panesByWindow[window.id], !panes.isEmpty else {
+                    reconciled.append(shortcut)
+                    continue
+                }
+                guard let pane = panes.first(where: shortcut.matches(pane:)) else {
+                    didChange = true
+                    continue
+                }
+                updated.updateMetadata(from: TmuxShortcut(
+                    kind: .pane,
+                    host: host,
+                    session: session,
+                    window: window,
+                    pane: pane
+                ))
+            }
+
+            if updated != shortcut {
+                didChange = true
+            }
+            reconciled.append(updated)
         }
 
-        if tmuxShortcuts.count != originalCount {
+        let deduped = deduplicatedTmuxShortcuts(reconciled)
+        if deduped.didChange {
+            didChange = true
+        }
+
+        if didChange {
+            tmuxShortcuts = deduped.shortcuts
             save()
         }
     }
@@ -272,7 +321,10 @@ final class DataStore {
     private func pruneTmuxShortcuts() {
         let favoriteIDs = Set(tmuxShortcuts.filter(\.isFavorite).map(\.id))
         let recentIDs = Set(tmuxShortcuts.sorted(by: compareShortcutsByRecentUse).prefix(40).map(\.id))
-        tmuxShortcuts.removeAll { !favoriteIDs.contains($0.id) && !recentIDs.contains($0.id) }
+        tmuxShortcuts.removeAll {
+            isObsoleteShortcut($0, raghudtHostIDs: []) ||
+                (!favoriteIDs.contains($0.id) && !recentIDs.contains($0.id))
+        }
     }
 
     private func compareShortcutsByRecentUse(_ lhs: TmuxShortcut, _ rhs: TmuxShortcut) -> Bool {
@@ -390,6 +442,19 @@ final class DataStore {
         host.hostname == "raghudt" ||
             host.hostname == "10.110.49.244" ||
             host.displayName.localizedCaseInsensitiveCompare("raghudt") == .orderedSame
+    }
+
+    private func isObsoleteShortcut(_ shortcut: TmuxShortcut, raghudtHostIDs: Set<UUID>) -> Bool {
+        if raghudtHostIDs.contains(shortcut.hostID), shortcut.sessionName == "mobile" {
+            return true
+        }
+
+        guard shortcut.hostID == Self.reverseTunnelMacHostID ||
+            shortcut.hostDisplayName == "This Mac via raghudt" else {
+            return false
+        }
+
+        return shortcut.sessionName == "hermit-mobile" || shortcut.sessionName == "mobile"
     }
 
     private func reverseTunnelMacHost(from sourceHost: Host) -> Host {

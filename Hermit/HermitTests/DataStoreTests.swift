@@ -142,4 +142,84 @@ struct DataStoreTests {
         #expect(shortcut.hostDisplayName == "This Mac via raghudt")
         #expect(shortcut.windowName == "codex-renamed")
     }
+
+    @Test func reconcileTmuxShortcutsUpdatesLiveMetadataAndRemovesMissingWindows() throws {
+        let store = DataStore()
+        let host = Host(displayName: "This Mac via raghudt", hostname: "127.0.0.1", port: 22220, username: "raghu")
+        let savedSession = TmuxSession(id: "$old", name: "0", attachedCount: 1)
+        let savedWindow = TmuxWindow(id: "@2", sessionId: "$old", index: 0, name: "old-name", isActive: true, layout: "")
+        let missingWindow = TmuxWindow(id: "@99", sessionId: "$old", index: 9, name: "gone", isActive: false, layout: "")
+        let liveSession = TmuxSession(id: "$1", name: "0", attachedCount: 1)
+        let liveWindow = TmuxWindow(id: "@2", sessionId: "$1", index: 3, name: "codex", isActive: true, layout: "")
+        let oldDate = Date(timeIntervalSince1970: 1)
+
+        store.hosts = [host]
+        store.tmuxShortcuts = [
+            TmuxShortcut(
+                kind: .window,
+                host: host,
+                session: savedSession,
+                window: savedWindow,
+                isFavorite: true,
+                visitCount: 4,
+                lastVisitedAt: oldDate
+            ),
+            TmuxShortcut(
+                kind: .window,
+                host: host,
+                session: savedSession,
+                window: missingWindow,
+                isFavorite: true,
+                visitCount: 3,
+                lastVisitedAt: oldDate
+            )
+        ]
+
+        store.reconcileTmuxShortcuts(
+            for: host,
+            sessions: [liveSession],
+            windowsBySession: [liveSession.id: [liveWindow]],
+            panesByWindow: [:]
+        )
+
+        #expect(store.tmuxShortcuts.count == 1)
+        #expect(store.tmuxShortcuts[0].isFavorite)
+        #expect(store.tmuxShortcuts[0].visitCount == 4)
+        #expect(store.tmuxShortcuts[0].sessionID == "$1")
+        #expect(store.tmuxShortcuts[0].windowIndex == 3)
+        #expect(store.tmuxShortcuts[0].windowName == "codex")
+    }
+
+    @Test func recordVisitPrunesObsoleteMacHermitMobileShortcut() throws {
+        let store = DataStore()
+        let macHost = Host(
+            id: UUID(uuidString: "EED9DA12-53C1-489C-B761-3013BDD43355")!,
+            displayName: "This Mac via raghudt",
+            hostname: "127.0.0.1",
+            port: 22220,
+            username: "raghu"
+        )
+        let obsoleteSession = TmuxSession(id: "$old", name: "hermit-mobile", attachedCount: 0)
+        let obsoleteWindow = TmuxWindow(id: "@old", sessionId: "$old", index: 0, name: "bash", isActive: true, layout: "")
+        let liveSession = TmuxSession(id: "$1", name: "0", attachedCount: 1)
+        let liveWindow = TmuxWindow(id: "@2", sessionId: "$1", index: 0, name: "node", isActive: true, layout: "")
+
+        store.hosts = [macHost]
+        store.tmuxShortcuts = [
+            TmuxShortcut(
+                kind: .window,
+                host: macHost,
+                session: obsoleteSession,
+                window: obsoleteWindow,
+                isFavorite: true,
+                visitCount: 8
+            )
+        ]
+
+        store.recordVisit(TmuxShortcut(kind: .window, host: macHost, session: liveSession, window: liveWindow))
+
+        #expect(store.tmuxShortcuts.count == 1)
+        #expect(store.tmuxShortcuts[0].sessionName == "0")
+        #expect(store.tmuxShortcuts[0].windowName == "node")
+    }
 }
