@@ -13,6 +13,7 @@ final class DataStore {
 
     private static let reverseTunnelMacHostID = UUID(uuidString: "EED9DA12-53C1-489C-B761-3013BDD43355")!
     private static let obsoleteVPNMacHostID = UUID(uuidString: "83540C4C-2633-4C44-936C-EED9AE6F7EDB")!
+    private static let hedgehogHostID = UUID(uuidString: "7D4C3575-55A4-46ED-B543-B7B1D40B0E14")!
     private static let reverseTunnelMacTmuxSocketName: String? = nil
     private static let reverseTunnelMacSessionName = "0"
 
@@ -73,7 +74,14 @@ final class DataStore {
             let backup = try JSONDecoder.hermit.decode(BackupData.self, from: data)
             let migratedHosts = backup.hosts.map { migrateHost($0) }
             let hostsDidChange = zip(backup.hosts, migratedHosts).contains { original, migrated in
-                original.defaultTmuxSessionName != migrated.defaultTmuxSessionName ||
+                original.displayName != migrated.displayName ||
+                    original.hostname != migrated.hostname ||
+                    original.port != migrated.port ||
+                    original.username != migrated.username ||
+                    original.privateKeyRef != migrated.privateKeyRef ||
+                    original.jumpHost != migrated.jumpHost ||
+                    original.localPortForwards != migrated.localPortForwards ||
+                    original.defaultTmuxSessionName != migrated.defaultTmuxSessionName ||
                     original.tmuxSocketName != migrated.tmuxSocketName
             }
             let profileMigration = migrateReverseTunnelProfile(
@@ -81,19 +89,23 @@ final class DataStore {
                 sessions: backup.sessions,
                 shortcuts: backup.tmuxShortcuts
             )
-            let knownHostIDs = Set(profileMigration.hosts.map(\.id))
-            let raghudtHostIDs = Set(profileMigration.hosts.filter(isKnownRaghudtProfile).map(\.id))
+            let hedgehogMigration = migrateHedgehogProfile(hosts: profileMigration.hosts)
+            let knownHostIDs = Set(hedgehogMigration.hosts.map(\.id))
+            let raghudtHostIDs = Set(hedgehogMigration.hosts.filter(isKnownRaghudtProfile).map(\.id))
 
             let filteredShortcuts = profileMigration.shortcuts.filter { shortcut in
                 knownHostIDs.contains(shortcut.hostID) &&
                     !isObsoleteShortcut(shortcut, raghudtHostIDs: raghudtHostIDs)
             }
 
-            self.hosts = profileMigration.hosts
+            self.hosts = hedgehogMigration.hosts
             self.sessions = profileMigration.sessions
             self.tmuxShortcuts = filteredShortcuts
 
-            if hostsDidChange || profileMigration.didChange || filteredShortcuts.count != profileMigration.shortcuts.count {
+            if hostsDidChange ||
+                profileMigration.didChange ||
+                hedgehogMigration.didChange ||
+                filteredShortcuts.count != profileMigration.shortcuts.count {
                 save()
             }
         } catch {
@@ -343,10 +355,29 @@ final class DataStore {
             host.defaultTmuxSessionName = Self.reverseTunnelMacSessionName
             host.tmuxSocketName = Self.reverseTunnelMacTmuxSocketName
         }
+        if isKnownHedgehogProfile(host) {
+            host = hedgehogHost(from: host)
+        }
         // Always sync ribbon configs to current defaults
         // During active development, this ensures all hosts pick up button changes
         host.ribbonConfigs = RibbonConfig.presets
         return host
+    }
+
+    private func migrateHedgehogProfile(hosts: [Host]) -> (hosts: [Host], didChange: Bool) {
+        let canonicalHost = hedgehogHost(from: hosts.first(where: isKnownHedgehogProfile))
+        var migratedHosts = hosts
+
+        if let index = migratedHosts.firstIndex(where: isKnownHedgehogProfile) {
+            if !isSameHedgehogHost(migratedHosts[index], canonicalHost) {
+                migratedHosts[index] = canonicalHost
+                return (migratedHosts, true)
+            }
+            return (migratedHosts, false)
+        }
+
+        migratedHosts.append(canonicalHost)
+        return (migratedHosts, true)
     }
 
     private func migrateReverseTunnelProfile(
@@ -444,6 +475,16 @@ final class DataStore {
             host.displayName.localizedCaseInsensitiveCompare("raghudt") == .orderedSame
     }
 
+    private func isKnownHedgehogProfile(_ host: Host) -> Bool {
+        host.id == Self.hedgehogHostID ||
+            (
+                host.username == "raghu" &&
+                host.hostname == "hedgehog6209.ddns.net" &&
+                host.port == 10000
+            ) ||
+            host.displayName.localizedCaseInsensitiveCompare("Hedgehog") == .orderedSame
+    }
+
     private func isObsoleteShortcut(_ shortcut: TmuxShortcut, raghudtHostIDs: Set<UUID>) -> Bool {
         if raghudtHostIDs.contains(shortcut.hostID), shortcut.sessionName == "mobile" {
             return true
@@ -458,7 +499,7 @@ final class DataStore {
     }
 
     private func reverseTunnelMacHost(from sourceHost: Host) -> Host {
-        Host(
+        return Host(
             id: Self.reverseTunnelMacHostID,
             displayName: "This Mac via raghudt",
             hostname: "127.0.0.1",
@@ -478,6 +519,32 @@ final class DataStore {
         )
     }
 
+    private func hedgehogHost(from sourceHost: Host? = nil) -> Host {
+        let sourcePrivateKeyRef = sourceHost?.privateKeyRef.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let privateKeyRef = sourcePrivateKeyRef.isEmpty ? "dev-ssh-key" : sourcePrivateKeyRef
+
+        return Host(
+            id: sourceHost?.id ?? Self.hedgehogHostID,
+            displayName: "Hedgehog",
+            hostname: "hedgehog6209.ddns.net",
+            port: 10000,
+            username: "raghu",
+            privateKeyRef: privateKeyRef,
+            localPortForwards: [
+                LocalPortForward(
+                    localHost: "127.0.0.1",
+                    localPort: 3000,
+                    remoteHost: "127.0.0.1",
+                    remotePort: 3000
+                )
+            ],
+            defaultTmuxSessionName: sourceHost?.defaultTmuxSessionName ?? "0",
+            tmuxSocketName: sourceHost?.tmuxSocketName,
+            ribbonConfigs: sourceHost?.ribbonConfigs ?? RibbonConfig.presets,
+            createdAt: sourceHost?.createdAt ?? Date()
+        )
+    }
+
     private func isSameReverseTunnelHost(_ lhs: Host, _ rhs: Host) -> Bool {
         lhs.displayName == rhs.displayName &&
             lhs.hostname == rhs.hostname &&
@@ -485,6 +552,19 @@ final class DataStore {
             lhs.username == rhs.username &&
             lhs.privateKeyRef == rhs.privateKeyRef &&
             lhs.jumpHost == rhs.jumpHost &&
+            lhs.localPortForwards == rhs.localPortForwards &&
+            lhs.defaultTmuxSessionName == rhs.defaultTmuxSessionName &&
+            lhs.tmuxSocketName == rhs.tmuxSocketName
+    }
+
+    private func isSameHedgehogHost(_ lhs: Host, _ rhs: Host) -> Bool {
+        lhs.displayName == rhs.displayName &&
+            lhs.hostname == rhs.hostname &&
+            lhs.port == rhs.port &&
+            lhs.username == rhs.username &&
+            lhs.privateKeyRef == rhs.privateKeyRef &&
+            lhs.jumpHost == rhs.jumpHost &&
+            lhs.localPortForwards == rhs.localPortForwards &&
             lhs.defaultTmuxSessionName == rhs.defaultTmuxSessionName &&
             lhs.tmuxSocketName == rhs.tmuxSocketName
     }
@@ -494,6 +574,7 @@ final class DataStore {
         // When iCloud is available, we wait for the download instead.
         guard iCloudURL == nil else { return }
         if !FileManager.default.fileExists(atPath: localFileURL.path) {
+            hosts = migrateHedgehogProfile(hosts: hosts).hosts
             save()
         }
     }

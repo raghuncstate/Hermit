@@ -19,6 +19,25 @@ struct SSHJumpHost: Codable, Hashable {
     }
 }
 
+struct LocalPortForward: Codable, Hashable {
+    var localHost: String
+    var localPort: Int
+    var remoteHost: String
+    var remotePort: Int
+
+    init(
+        localHost: String = "127.0.0.1",
+        localPort: Int,
+        remoteHost: String = "127.0.0.1",
+        remotePort: Int
+    ) {
+        self.localHost = localHost
+        self.localPort = localPort
+        self.remoteHost = remoteHost
+        self.remotePort = remotePort
+    }
+}
+
 struct Host: Codable, Identifiable {
     var id: UUID
     var displayName: String
@@ -27,6 +46,7 @@ struct Host: Codable, Identifiable {
     var username: String
     var privateKeyRef: String
     var jumpHost: SSHJumpHost?
+    var localPortForwards: [LocalPortForward]
     var defaultTmuxSessionName: String
     var tmuxSocketName: String?
     var ribbonConfigs: [RibbonConfig]
@@ -45,6 +65,7 @@ struct Host: Codable, Identifiable {
         username: String,
         privateKeyRef: String = "",
         jumpHost: SSHJumpHost? = nil,
+        localPortForwards: [LocalPortForward] = [],
         defaultTmuxSessionName: String = "0",
         tmuxSocketName: String? = nil,
         ribbonConfigs: [RibbonConfig] = RibbonConfig.presets,
@@ -57,6 +78,7 @@ struct Host: Codable, Identifiable {
         self.username = username
         self.privateKeyRef = privateKeyRef
         self.jumpHost = jumpHost
+        self.localPortForwards = localPortForwards
         self.defaultTmuxSessionName = defaultTmuxSessionName
         self.tmuxSocketName = Self.normalizedTmuxSocketName(tmuxSocketName)
         self.ribbonConfigs = ribbonConfigs
@@ -65,6 +87,7 @@ struct Host: Codable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, displayName, hostname, port, username, privateKeyRef, jumpHost
+        case localPortForwards
         case defaultTmuxSessionName, defaultTmuxSession, tmuxSocketName
         case ribbonConfigs, ribbonConfig, createdAt
     }
@@ -78,6 +101,7 @@ struct Host: Codable, Identifiable {
         username = try c.decode(String.self, forKey: .username)
         privateKeyRef = try c.decode(String.self, forKey: .privateKeyRef)
         jumpHost = try? c.decode(SSHJumpHost.self, forKey: .jumpHost)
+        localPortForwards = (try? c.decode([LocalPortForward].self, forKey: .localPortForwards)) ?? []
         defaultTmuxSessionName =
             (try? c.decode(String.self, forKey: .defaultTmuxSessionName)) ??
             (try? c.decode(String.self, forKey: .defaultTmuxSession)) ??
@@ -104,6 +128,9 @@ struct Host: Codable, Identifiable {
         try c.encode(username, forKey: .username)
         try c.encode(privateKeyRef, forKey: .privateKeyRef)
         try c.encodeIfPresent(jumpHost, forKey: .jumpHost)
+        if !localPortForwards.isEmpty {
+            try c.encode(localPortForwards, forKey: .localPortForwards)
+        }
         try c.encode(defaultTmuxSessionName, forKey: .defaultTmuxSessionName)
         try c.encodeIfPresent(tmuxSocketName, forKey: .tmuxSocketName)
         try c.encode(ribbonConfigs, forKey: .ribbonConfigs)

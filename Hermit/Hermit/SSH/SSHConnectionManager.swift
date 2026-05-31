@@ -2,16 +2,205 @@ import Foundation
 import Citadel
 import Crypto
 import NIOCore
+import NIOPosix
 import NIOSSH
 import os
 
 private let logger = Logger(subsystem: "com.zeromissionllc.hermit", category: "SSH")
+private let portForwardLogger = Logger(subsystem: "com.zeromissionllc.hermit", category: "PortForward")
+
+final class LocalPortForwarder {
+    private let forward: LocalPortForward
+    private var listenChannel: Channel?
+
+    init(forward: LocalPortForward) {
+        self.forward = forward
+    }
+
+    func start(using sshClient: SSHClient) async throws {
+        guard listenChannel == nil else { return }
+
+        let bootstrap = ServerBootstrap(group: sshClient.eventLoop)
+            .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+            .childChannelInitializer { [forward] inboundChannel in
+                inboundChannel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).flatMap {
+                    let promise = inboundChannel.eventLoop.makePromise(of: Void.self)
+                    promise.completeWithTask {
+                        try await Self.openForward(
+                            forward,
+                            inboundChannel: inboundChannel,
+                            using: sshClient
+                        )
+                    }
+                    return promise.futureResult
+                }
+            }
+
+        listenChannel = try await bootstrap
+            .bind(host: forward.localHost, port: forward.localPort)
+            .get()
+
+        portForwardLogger.info(
+            "Listening on \(self.forward.localHost):\(self.forward.localPort) and forwarding to \(self.forward.remoteHost):\(self.forward.remotePort)"
+        )
+    }
+
+    func stop() async {
+        guard let listenChannel else { return }
+        self.listenChannel = nil
+        try? await listenChannel.close().get()
+    }
+
+    private static func openForward(
+        _ forward: LocalPortForward,
+        inboundChannel: Channel,
+        using sshClient: SSHClient
+    ) async throws {
+        let originatorAddress = try inboundChannel.remoteAddress ?? SocketAddress(
+            ipAddress: forward.localHost,
+            port: forward.localPort
+        )
+
+        _ = try await sshClient.createDirectTCPIPChannel(
+            using: SSHChannelType.DirectTCPIP(
+                targetHost: forward.remoteHost,
+                targetPort: forward.remotePort,
+                originatorAddress: originatorAddress
+            )
+        ) { outboundChannel in
+            let (localGlue, remoteGlue) = PortForwardGlueHandler.matchedPair()
+            return outboundChannel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true).flatMap {
+                outboundChannel.pipeline.addHandlers([
+                    remoteGlue,
+                    PortForwardErrorHandler()
+                ])
+            }.flatMap {
+                inboundChannel.pipeline.addHandlers([
+                    localGlue,
+                    PortForwardErrorHandler()
+                ])
+            }
+        }
+    }
+}
+
+private final class PortForwardErrorHandler: ChannelInboundHandler {
+    typealias InboundIn = NIOAny
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        portForwardLogger.error("Port forward channel error: \(error.localizedDescription)")
+        context.close(promise: nil)
+    }
+}
+
+private final class PortForwardGlueHandler {
+    private var partner: PortForwardGlueHandler?
+    private var context: ChannelHandlerContext?
+    private var pendingRead = false
+
+    private init() {}
+
+    static func matchedPair() -> (PortForwardGlueHandler, PortForwardGlueHandler) {
+        let first = PortForwardGlueHandler()
+        let second = PortForwardGlueHandler()
+        first.partner = second
+        second.partner = first
+        return (first, second)
+    }
+
+    private func partnerWrite(_ data: NIOAny) {
+        context?.write(data, promise: nil)
+    }
+
+    private func partnerFlush() {
+        context?.flush()
+    }
+
+    private func partnerWriteEOF() {
+        context?.close(mode: .output, promise: nil)
+    }
+
+    private func partnerCloseFull() {
+        context?.close(promise: nil)
+    }
+
+    private func partnerBecameWritable() {
+        if pendingRead {
+            pendingRead = false
+            context?.read()
+        }
+    }
+
+    private var partnerWritable: Bool {
+        context?.channel.isWritable ?? false
+    }
+}
+
+extension PortForwardGlueHandler: ChannelDuplexHandler {
+    typealias InboundIn = NIOAny
+    typealias OutboundIn = NIOAny
+    typealias OutboundOut = NIOAny
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        self.context = context
+        if context.channel.isWritable {
+            partner?.partnerBecameWritable()
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.context = nil
+        partner = nil
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        partner?.partnerWrite(data)
+    }
+
+    func channelReadComplete(context: ChannelHandlerContext) {
+        partner?.partnerFlush()
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        partner?.partnerCloseFull()
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let event = event as? ChannelEvent, case .inputClosed = event {
+            partner?.partnerWriteEOF()
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        partner?.partnerCloseFull()
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            partner?.partnerBecameWritable()
+        }
+    }
+
+    func read(context: ChannelHandlerContext) {
+        if let partner, partner.partnerWritable {
+            context.read()
+        } else {
+            pendingRead = true
+        }
+    }
+}
 
 struct SSHClientConnection {
     let client: SSHClient
     let jumpClient: SSHClient?
+    let localPortForwarders: [LocalPortForwarder]
 
     func close() async {
+        for forwarder in localPortForwarders {
+            await forwarder.stop()
+        }
         try? await client.close()
         try? await jumpClient?.close()
     }
@@ -144,7 +333,8 @@ final class SSHConnectionManager {
 
         guard let jumpHost = host.jumpHost else {
             let sshClient = try await SSHClient.connect(to: targetSettings)
-            return SSHClientConnection(client: sshClient, jumpClient: nil)
+            let localForwarders = try await startLocalPortForwards(host.localPortForwards, using: sshClient)
+            return SSHClientConnection(client: sshClient, jumpClient: nil, localPortForwarders: localForwarders)
         }
 
         logger.info("Connecting through jump host \(jumpHost.hostname):\(jumpHost.port) as \(jumpHost.username)")
@@ -160,9 +350,30 @@ final class SSHConnectionManager {
 
         do {
             let targetClient = try await jumpClient.jump(to: targetSettings)
-            return SSHClientConnection(client: targetClient, jumpClient: jumpClient)
+            let localForwarders = try await startLocalPortForwards(host.localPortForwards, using: targetClient)
+            return SSHClientConnection(client: targetClient, jumpClient: jumpClient, localPortForwarders: localForwarders)
         } catch {
             try? await jumpClient.close()
+            throw error
+        }
+    }
+
+    private static func startLocalPortForwards(
+        _ forwards: [LocalPortForward],
+        using sshClient: SSHClient
+    ) async throws -> [LocalPortForwarder] {
+        var started: [LocalPortForwarder] = []
+        do {
+            for portForward in forwards {
+                let forwarder = LocalPortForwarder(forward: portForward)
+                try await forwarder.start(using: sshClient)
+                started.append(forwarder)
+            }
+            return started
+        } catch {
+            for forwarder in started {
+                await forwarder.stop()
+            }
             throw error
         }
     }
