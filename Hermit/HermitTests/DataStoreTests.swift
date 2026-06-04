@@ -222,4 +222,74 @@ struct DataStoreTests {
         #expect(store.tmuxShortcuts[0].sessionName == "0")
         #expect(store.tmuxShortcuts[0].windowName == "node")
     }
+
+    @Test func shortcutListsIgnoreMissingHosts() throws {
+        let store = DataStore()
+        let liveHost = Host(displayName: "raghudt", hostname: "10.110.49.244", username: "raghupathyk")
+        let missingHost = Host(displayName: "Old Mac VPN", hostname: "10.221.12.198", username: "raghu")
+        let tmuxSession = TmuxSession(id: "$1", name: "0", attachedCount: 1)
+        let liveWindow = TmuxWindow(id: "@1", sessionId: "$1", index: 0, name: "codex", isActive: true, layout: "")
+        let staleWindow = TmuxWindow(id: "@2", sessionId: "$1", index: 1, name: "stale", isActive: false, layout: "")
+
+        store.hosts = [liveHost]
+        store.tmuxShortcuts = [
+            TmuxShortcut(
+                kind: .window,
+                host: missingHost,
+                session: tmuxSession,
+                window: staleWindow,
+                isFavorite: true,
+                visitCount: 8
+            ),
+            TmuxShortcut(
+                kind: .window,
+                host: liveHost,
+                session: tmuxSession,
+                window: liveWindow,
+                isFavorite: true,
+                visitCount: 2
+            )
+        ]
+
+        let favorites = store.favoriteTmuxShortcuts(kind: .window)
+
+        #expect(favorites.count == 1)
+        #expect(favorites[0].hostID == liveHost.id)
+        #expect(favorites[0].windowName == "codex")
+    }
+
+    @Test func removesShortcutsWithoutKnownHosts() throws {
+        let store = DataStore()
+        let liveHost = Host(displayName: "raghudt", hostname: "10.110.49.244", username: "raghupathyk")
+        let missingHost = Host(displayName: "Old Mac VPN", hostname: "10.221.12.198", username: "raghu")
+        let tmuxSession = TmuxSession(id: "$1", name: "0", attachedCount: 1)
+        let liveWindow = TmuxWindow(id: "@1", sessionId: "$1", index: 0, name: "codex", isActive: true, layout: "")
+        let staleWindow = TmuxWindow(id: "@2", sessionId: "$1", index: 1, name: "stale", isActive: false, layout: "")
+
+        store.hosts = [liveHost]
+        store.tmuxShortcuts = [
+            TmuxShortcut(kind: .window, host: missingHost, session: tmuxSession, window: staleWindow),
+            TmuxShortcut(kind: .window, host: liveHost, session: tmuxSession, window: liveWindow)
+        ]
+
+        let removedCount = store.removeTmuxShortcutsWithoutKnownHosts()
+
+        #expect(removedCount == 1)
+        #expect(store.tmuxShortcuts.count == 1)
+        #expect(store.tmuxShortcuts[0].hostID == liveHost.id)
+    }
+
+    @Test func shortcutNavigationIdentityIncludesHost() throws {
+        let raghudt = Host(displayName: "raghudt", hostname: "10.110.49.244", username: "raghupathyk")
+        let mac = Host(displayName: "This Mac via raghudt", hostname: "127.0.0.1", port: 22220, username: "raghu")
+        let tmuxSession = TmuxSession(id: "$1", name: "0", attachedCount: 1)
+        let window = TmuxWindow(id: "@1", sessionId: "$1", index: 0, name: "codex", isActive: true, layout: "")
+
+        let raghudtShortcut = TmuxShortcut(kind: .window, host: raghudt, session: tmuxSession, window: window)
+        let macShortcut = TmuxShortcut(kind: .window, host: mac, session: tmuxSession, window: window)
+
+        #expect(raghudtShortcut.navigationIdentity != macShortcut.navigationIdentity)
+        #expect(raghudtShortcut.navigationIdentity.contains(raghudt.id.uuidString))
+        #expect(macShortcut.navigationIdentity.contains(mac.id.uuidString))
+    }
 }

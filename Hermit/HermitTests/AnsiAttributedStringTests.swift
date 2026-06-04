@@ -67,5 +67,39 @@ final class AnsiAttributedStringTests: XCTestCase {
         XCTAssertEqual(green, 20.0 / 255.0, accuracy: 0.01)
         XCTAssertEqual(blue, 30.0 / 255.0, accuracy: 0.01)
     }
+
+    func testDetectsIndentedWrappedTerminalLinks() {
+        let fullURL = "https://nvidia.atlassian.net/wiki/spaces/SPS/pages/3535324266/LP30+UDS"
+        let wrappedURL = "  https://nvidia.atlassian.net/wiki/spaces/S\n  PS/pages/3535324266/LP30+UDS"
+        let text = NSMutableAttributedString(string: wrappedURL)
+
+        TerminalLinkDetector.addDetectedLinks(to: text)
+
+        let nsString = text.string as NSString
+        let firstFragment = nsString.range(of: "https://nvidia.atlassian.net")
+        let secondFragment = nsString.range(of: "PS/pages/3535324266")
+        let skippedIndent = nsString.range(of: "\n  PS")
+        let firstLink = text.attribute(.link, at: firstFragment.location, effectiveRange: nil) as? URL
+        let secondLink = text.attribute(.link, at: secondFragment.location, effectiveRange: nil) as? URL
+
+        XCTAssertEqual(firstLink?.absoluteString, fullURL)
+        XCTAssertEqual(secondLink?.absoluteString, fullURL)
+        XCTAssertNil(text.attribute(.link, at: skippedIndent.location + 1, effectiveRange: nil))
+        XCTAssertNil(text.attribute(.link, at: skippedIndent.location + 2, effectiveRange: nil))
+    }
+
+    func testDoesNotJoinShortLinkToNextIndentedLine() {
+        let text = NSMutableAttributedString(string: "Open https://example.com\n  Then continue")
+
+        TerminalLinkDetector.addDetectedLinks(to: text)
+
+        let nsString = text.string as NSString
+        let linkFragment = nsString.range(of: "https://example.com")
+        let nextLine = nsString.range(of: "Then")
+        let link = text.attribute(.link, at: linkFragment.location, effectiveRange: nil) as? URL
+
+        XCTAssertEqual(link?.absoluteString, "https://example.com")
+        XCTAssertNil(text.attribute(.link, at: nextLine.location, effectiveRange: nil))
+    }
 #endif
 }

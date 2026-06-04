@@ -1,0 +1,26 @@
+{
+  "session": "hermit-tmux-test",
+  "version": 1,
+  "windows": [
+    {
+      "agent": "shell",
+      "command": [
+        "bash",
+        "-lc",
+        "printf 'alpha restored\\n'; exec bash -l"
+      ],
+      "cwd": "/Users/raghu/tmp",
+      "name": "alpha-test"
+    },
+    {
+      "agent": "shell",
+      "command": [
+        "bash",
+        "-lc",
+        "printf 'beta restored\\n'; exec bash -l"
+      ],
+      "cwd": "/Users/raghu/tmp",
+      "name": "beta-test"
+    }
+  ]
+}

@@ -43,7 +43,6 @@ struct WindowDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
     @Environment(DataStore.self) private var dataStore
-    @Environment(AppNavigator.self) private var navigator
     @State private var selectedPaneId: String?
     @State private var selectedWindowId: String?
     @State private var commandText = ""
@@ -409,7 +408,7 @@ struct WindowDetailView: View {
                 },
                 onRefresh: { finish in
                     Task { @MainActor in
-                        await refreshSelectedPane(forceReconnect: true)
+                        await loadScrollbackFromTerminalPull(pane)
                         finish()
                     }
                 }
@@ -530,10 +529,7 @@ struct WindowDetailView: View {
     @ViewBuilder
     private func shortcutSwitcherRow(_ shortcut: TmuxShortcut) -> some View {
         if dataStore.host(for: shortcut) != nil {
-            Button {
-                showingWindowSwitcher = false
-                navigator.open(shortcut)
-            } label: {
+            NavigationLink(value: AppRoute.shortcut(shortcut)) {
                 HStack(spacing: 10) {
                     Image(systemName: shortcut.systemImage)
                         .foregroundStyle(.secondary)
@@ -563,6 +559,9 @@ struct WindowDetailView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture().onEnded {
+                showingWindowSwitcher = false
+            })
         }
     }
 
@@ -1062,6 +1061,13 @@ struct WindowDetailView: View {
         }
     }
 
+    private func loadScrollbackFromTerminalPull(_ pane: TmuxPane) async {
+        follow = false
+        model.setFollow(pane.id, enabled: false)
+        await model.captureScrollback(pane)
+        scrollbackLoadedPaneIds.insert(pane.id)
+    }
+
     private func requestPaneScroll(_ action: PaneScrollAction) {
         follow = action != .top
         if let pane = selectedPane {
@@ -1317,103 +1323,8 @@ struct WindowDetailView: View {
             } else {
                 output.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
             }
-            addDetectedLinks(to: output)
+            TerminalLinkDetector.addDetectedLinks(to: output)
             return output
-        }
-
-        private static func addDetectedLinks(to text: NSMutableAttributedString) {
-            guard text.length > 0,
-                  let detector = Self.linkDetector else {
-                return
-            }
-
-            let scanText = linkScanText(from: text.string)
-            let fullRange = NSRange(location: 0, length: scanText.text.utf16.count)
-            detector.enumerateMatches(in: scanText.text, options: [], range: fullRange) { result, _, _ in
-                guard let result,
-                      result.url != nil,
-                      let originalRange = scanText.originalRange(for: result.range) else {
-                    return
-                }
-                text.addAttributes([
-                    .link: String((text.string as NSString).substring(with: originalRange).filter { $0 != "\n" }),
-                    .foregroundColor: UIColor.systemBlue,
-                    .underlineStyle: NSUnderlineStyle.single.rawValue,
-                ], range: originalRange)
-            }
-        }
-
-        private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-
-        private struct LinkScanText {
-            var text: String
-            var originalUTF16Offsets: [Int]
-            var originalUTF16Length: Int
-
-            func originalRange(for range: NSRange) -> NSRange? {
-                guard range.location >= 0, range.length > 0 else { return nil }
-                let upperBound = range.location + range.length
-                guard range.location < originalUTF16Offsets.count,
-                      upperBound <= originalUTF16Offsets.count else {
-                    return nil
-                }
-
-                let originalStart = originalUTF16Offsets[range.location]
-                let originalEnd = upperBound < originalUTF16Offsets.count
-                    ? originalUTF16Offsets[upperBound]
-                    : originalUTF16Length
-                guard originalEnd > originalStart else { return nil }
-                return NSRange(location: originalStart, length: originalEnd - originalStart)
-            }
-        }
-
-        private static func linkScanText(from original: String) -> LinkScanText {
-            var normalized = ""
-            var originalUTF16Offsets: [Int] = []
-            var originalUTF16Offset = 0
-            var index = original.startIndex
-
-            while index < original.endIndex {
-                let character = original[index]
-                let characterString = String(character)
-
-                if character == "\n", shouldSkipSoftWrapNewline(in: original, at: index) {
-                    originalUTF16Offset += characterString.utf16.count
-                    index = original.index(after: index)
-                    continue
-                }
-
-                normalized.append(character)
-                for offset in 0..<characterString.utf16.count {
-                    originalUTF16Offsets.append(originalUTF16Offset + offset)
-                }
-                originalUTF16Offset += characterString.utf16.count
-                index = original.index(after: index)
-            }
-
-            return LinkScanText(
-                text: normalized,
-                originalUTF16Offsets: originalUTF16Offsets,
-                originalUTF16Length: originalUTF16Offset
-            )
-        }
-
-        private static func shouldSkipSoftWrapNewline(in text: String, at index: String.Index) -> Bool {
-            guard index > text.startIndex else { return false }
-            let next = text.index(after: index)
-            guard next < text.endIndex else { return false }
-
-            let previous = text.index(before: index)
-            return isURLContinuationCharacter(text[previous])
-                && isURLContinuationCharacter(text[next])
-        }
-
-        private static func isURLContinuationCharacter(_ character: Character) -> Bool {
-            let scalarView = character.unicodeScalars
-            guard scalarView.count == 1, let scalar = scalarView.first else { return false }
-            guard scalar.value >= 0x21 && scalar.value <= 0x7E else { return false }
-            guard !CharacterSet.whitespacesAndNewlines.contains(scalar) else { return false }
-            return character != "<" && character != ">" && character != "\""
         }
 
         final class Coordinator: NSObject, UITextViewDelegate {
@@ -1470,22 +1381,19 @@ struct WindowDetailView: View {
                 let verticalDelta = abs(deltaY)
                 guard verticalDelta > 8, verticalDelta >= deltaX else { return }
 
+                let movedTowardHistory = deltaY < -8
+                if movedTowardHistory {
+                    guard !didHandleManualScrollAwayFromBottom else { return }
+                    didHandleManualScrollAwayFromBottom = true
+                    onManualScrollAwayFromBottom()
+                    return
+                }
+
                 if isNearBottom(scrollView, tolerance: 12) {
                     guard !didHandleManualScrollToBottom else { return }
                     didHandleManualScrollToBottom = true
                     onManualScrollToBottom()
-                    return
                 }
-
-                let movedTowardHistory = deltaY < -8
-                guard movedTowardHistory,
-                      !didHandleManualScrollAwayFromBottom,
-                      !isNearBottom(scrollView, tolerance: 32) else {
-                    return
-                }
-
-                didHandleManualScrollAwayFromBottom = true
-                onManualScrollAwayFromBottom()
             }
 
             func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -1506,6 +1414,19 @@ struct WindowDetailView: View {
                 guard !isProgrammaticScroll, textView.selectedRange.length > 0 else { return }
                 if !isNearBottom(textView, tolerance: 32) {
                     onManualScrollAwayFromBottom()
+                }
+            }
+
+            func textView(
+                _ textView: UITextView,
+                primaryActionFor textItem: UITextItem,
+                defaultAction: UIAction
+            ) -> UIAction? {
+                guard case let .link(url) = textItem.content else {
+                    return defaultAction
+                }
+                return UIAction { _ in
+                    UIApplication.shared.open(url)
                 }
             }
 
@@ -1580,5 +1501,160 @@ struct WindowDetailView: View {
 private extension UIEdgeInsets {
     var horizontal: CGFloat {
         left + right
+    }
+}
+
+enum TerminalLinkDetector {
+    private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let minimumWrappedURLFragmentLength = 24
+
+    static func addDetectedLinks(to text: NSMutableAttributedString) {
+        guard text.length > 0,
+              let detector else {
+            return
+        }
+
+        let scanText = linkScanText(from: text.string)
+        let fullRange = NSRange(location: 0, length: scanText.text.utf16.count)
+        detector.enumerateMatches(in: scanText.text, options: [], range: fullRange) { result, _, _ in
+            guard let result,
+                  let url = result.url ?? URL(string: (scanText.text as NSString).substring(with: result.range)) else {
+                return
+            }
+
+            for originalRange in scanText.originalRanges(for: result.range) {
+                text.addAttributes([
+                    .link: url,
+                    .foregroundColor: UIColor.systemBlue,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                ], range: originalRange)
+            }
+        }
+    }
+
+    private struct LinkScanText {
+        var text: String
+        var originalUTF16Offsets: [Int]
+
+        func originalRanges(for range: NSRange) -> [NSRange] {
+            guard range.location >= 0, range.length > 0 else { return [] }
+            let upperBound = range.location + range.length
+            guard range.location < originalUTF16Offsets.count,
+                  upperBound <= originalUTF16Offsets.count else {
+                return []
+            }
+
+            var ranges: [NSRange] = []
+            var start = originalUTF16Offsets[range.location]
+            var previous = start
+
+            for index in (range.location + 1)..<upperBound {
+                let current = originalUTF16Offsets[index]
+                if current == previous + 1 {
+                    previous = current
+                } else {
+                    ranges.append(NSRange(location: start, length: previous - start + 1))
+                    start = current
+                    previous = current
+                }
+            }
+
+            ranges.append(NSRange(location: start, length: previous - start + 1))
+            return ranges
+        }
+    }
+
+    private static func linkScanText(from original: String) -> LinkScanText {
+        var normalized = ""
+        var originalUTF16Offsets: [Int] = []
+        var originalUTF16Offset = 0
+        var index = original.startIndex
+
+        while index < original.endIndex {
+            let character = original[index]
+            let characterString = String(character)
+
+            if character == "\n",
+               let resumeIndex = softWrappedURLResumeIndex(in: original, at: index, normalizedSoFar: normalized) {
+                while index < resumeIndex {
+                    originalUTF16Offset += String(original[index]).utf16.count
+                    index = original.index(after: index)
+                }
+                continue
+            }
+
+            normalized.append(character)
+            for offset in 0..<characterString.utf16.count {
+                originalUTF16Offsets.append(originalUTF16Offset + offset)
+            }
+            originalUTF16Offset += characterString.utf16.count
+            index = original.index(after: index)
+        }
+
+        return LinkScanText(text: normalized, originalUTF16Offsets: originalUTF16Offsets)
+    }
+
+    private static func softWrappedURLResumeIndex(
+        in text: String,
+        at newlineIndex: String.Index,
+        normalizedSoFar: String
+    ) -> String.Index? {
+        guard newlineIndex > text.startIndex else { return nil }
+        let previousIndex = text.index(before: newlineIndex)
+        let previousCharacter = text[previousIndex]
+        guard isURLContinuationCharacter(previousCharacter),
+              let activeFragment = activeURLFragment(in: normalizedSoFar) else {
+            return nil
+        }
+
+        var resumeIndex = text.index(after: newlineIndex)
+        while resumeIndex < text.endIndex, isHorizontalWhitespace(text[resumeIndex]) {
+            resumeIndex = text.index(after: resumeIndex)
+        }
+        guard resumeIndex < text.endIndex else { return nil }
+
+        let nextCharacter = text[resumeIndex]
+        guard isURLContinuationCharacter(nextCharacter) else { return nil }
+
+        if activeFragment.count >= minimumWrappedURLFragmentLength {
+            return resumeIndex
+        }
+
+        if isStrongURLContinuationBoundary(previousCharacter) || isStrongURLContinuationBoundary(nextCharacter) {
+            return resumeIndex
+        }
+
+        return nil
+    }
+
+    private static func activeURLFragment(in normalizedText: String) -> String? {
+        guard let last = normalizedText.last,
+              isURLContinuationCharacter(last) else {
+            return nil
+        }
+
+        let start = normalizedText.lastIndex(where: { !isURLContinuationCharacter($0) })
+            .map { normalizedText.index(after: $0) }
+            ?? normalizedText.startIndex
+        let fragment = String(normalizedText[start...])
+        let lowercased = fragment.lowercased()
+        guard lowercased.contains("://") || lowercased.hasPrefix("www.") else { return nil }
+        return fragment
+    }
+
+    private static func isHorizontalWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t"
+    }
+
+    private static func isURLContinuationCharacter(_ character: Character) -> Bool {
+        let scalarView = character.unicodeScalars
+        guard scalarView.count == 1, let scalar = scalarView.first else { return false }
+        guard scalar.value >= 0x21 && scalar.value <= 0x7E else { return false }
+        guard !CharacterSet.whitespacesAndNewlines.contains(scalar) else { return false }
+        return character != "<" && character != ">" && character != "\""
+    }
+
+    private static func isStrongURLContinuationBoundary(_ character: Character) -> Bool {
+        "/?#&=_%.-:+~".contains(character)
     }
 }

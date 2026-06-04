@@ -1,12 +1,15 @@
 import SwiftUI
 import UIKit
 
-private enum AppRoute: Hashable {
+enum AppRoute: Hashable {
     case host(UUID)
     case shortcut(TmuxShortcut)
 }
 
 struct SessionListView: View {
+    private static let shortcutSelfTestIntervalNanoseconds: UInt64 = 120_000_000_000
+
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(DataStore.self) private var dataStore
     @Environment(AppNavigator.self) private var navigator
     @State private var showingNewHost = false
@@ -114,7 +117,12 @@ struct SessionListView: View {
             await refreshShortcutIndexes(force: true)
         }
         .task {
-            await refreshShortcutIndexes(force: false)
+            await runShortcutSelfTestLoop()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await refreshShortcutIndexes(force: true) }
+            }
         }
     }
 
@@ -124,6 +132,8 @@ struct SessionListView: View {
         didRefreshShortcuts = true
 
         guard !isRefreshingShortcuts else { return }
+        dataStore.removeTmuxShortcutsWithoutKnownHosts()
+
         let shortcutHostIDs = Set(dataStore.tmuxShortcuts.map(\.hostID))
         guard !shortcutHostIDs.isEmpty else { return }
 
@@ -131,10 +141,23 @@ struct SessionListView: View {
         guard !hostsWithShortcuts.isEmpty else { return }
 
         isRefreshingShortcuts = true
+        defer { isRefreshingShortcuts = false }
         for host in hostsWithShortcuts {
+            guard !Task.isCancelled else { return }
             await reconcileShortcuts(for: host)
         }
-        isRefreshingShortcuts = false
+    }
+
+    @MainActor
+    private func runShortcutSelfTestLoop() async {
+        await refreshShortcutIndexes(force: false)
+
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: Self.shortcutSelfTestIntervalNanoseconds)
+            guard !Task.isCancelled else { return }
+            guard scenePhase == .active else { continue }
+            await refreshShortcutIndexes(force: true)
+        }
     }
 
     @MainActor
@@ -186,6 +209,7 @@ struct SessionListView: View {
         case .shortcut(let shortcut):
             if let host = dataStore.host(for: shortcut) {
                 TmuxShortcutDestinationView(host: host, shortcut: shortcut)
+                    .id(shortcut.navigationIdentity)
             } else {
                 ContentUnavailableView("Host Missing", systemImage: "server.rack")
             }

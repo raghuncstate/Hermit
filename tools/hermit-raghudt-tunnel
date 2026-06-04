@@ -10,6 +10,9 @@ REMOTE_LISTEN_PORT="${HERMIT_TUNNEL_REMOTE_LISTEN_PORT:-22220}"
 LOCAL_TARGET_HOST="${HERMIT_TUNNEL_LOCAL_TARGET_HOST:-127.0.0.1}"
 LOCAL_TARGET_PORT="${HERMIT_TUNNEL_LOCAL_TARGET_PORT:-22}"
 IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
+REMOTE_CLEANUP_ENABLED="${HERMIT_TUNNEL_REMOTE_CLEANUP_ENABLED:-1}"
+REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
+REMOTE_CLEANUP_MIN_AGE_SECONDS="${HERMIT_TUNNEL_REMOTE_CLEANUP_MIN_AGE_SECONDS:-120}"
 APP_DIR="$HOME/Library/Application Support/Hermit"
 LOG_DIR="$HOME/Library/Logs/Hermit"
 CONTROL_SOCKET="$APP_DIR/raghudt-tunnel.ctl"
@@ -37,6 +40,11 @@ Commands:
   quiet-status  Exit 0 only when the SSH master tunnel is connected
   loaded-status Exit 0 only when the LaunchAgent is loaded
   diagnose      Print launchd status, checks, and recent logs
+  clear-remote-port
+               Clear a stale raghudt listener on the reverse tunnel port
+  show-status   Open a status report in TextEdit
+  show-diagnose Open a diagnosis report in TextEdit
+  show-logs     Open recent logs in TextEdit and Finder
   swiftbar-action <command>
                Run a command from SwiftBar and record visible feedback
   run-once      Internal launchd command; run one foreground tunnel process
@@ -144,6 +152,141 @@ print_recent_log_summary() {
   fi
 }
 
+remote_cleanup_ssh() {
+  local args=(
+    -x
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o StrictHostKeyChecking=accept-new
+    -p "$REMOTE_PORT"
+  )
+
+  if [[ -r "$REMOTE_CLEANUP_IDENTITY_FILE" ]]; then
+    args+=(-i "$REMOTE_CLEANUP_IDENTITY_FILE" -o IdentitiesOnly=yes)
+  fi
+
+  /usr/bin/ssh "${args[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
+}
+
+remote_listener_occupied() {
+  remote_cleanup_ssh /usr/bin/python3 - "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=2):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+clear_remote_port() {
+  if [[ "$REMOTE_CLEANUP_ENABLED" != "1" ]]; then
+    printf 'remote cleanup disabled (HERMIT_TUNNEL_REMOTE_CLEANUP_ENABLED=%s)\n' "$REMOTE_CLEANUP_ENABLED"
+    return 75
+  fi
+
+  if ! /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
+    printf 'raghudt is not reachable at %s:%s; cannot clear remote port\n' "$REMOTE_HOST" "$REMOTE_PORT"
+    return 75
+  fi
+
+  if ! remote_listener_occupied; then
+    printf 'remote listener is already clear: %s:%s\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+    return 0
+  fi
+
+  remote_cleanup_ssh /bin/bash -s -- \
+    "$REMOTE_LISTEN_HOST" \
+    "$REMOTE_LISTEN_PORT" \
+    "$REMOTE_CLEANUP_MIN_AGE_SECONDS" \
+    "$REMOTE_USER" <<'REMOTE'
+set -euo pipefail
+
+listen_host="$1"
+listen_port="$2"
+min_age="$3"
+remote_user="$4"
+
+occupied() {
+  /usr/bin/python3 - "$listen_host" "$listen_port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=2):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+if ! occupied; then
+  printf 'remote listener is already clear: %s:%s\n' "$listen_host" "$listen_port"
+  exit 0
+fi
+
+mapfile -t candidates < <(
+  ps -u "$USER" -o pid=,etimes=,args= |
+    awk -v min_age="$min_age" -v remote_user="$remote_user" '
+      {
+        pid=$1
+        etimes=$2
+        $1=""
+        $2=""
+        sub(/^  */, "")
+        if ($0 == "sshd: " remote_user && etimes >= min_age) {
+          print pid ":" etimes
+        }
+      }
+    '
+)
+
+if [[ ${#candidates[@]} -eq 0 ]]; then
+  printf 'remote listener is occupied, but no old Hermit-shaped sshd child was found\n'
+  exit 75
+fi
+
+for candidate in "${candidates[@]}"; do
+  pid="${candidate%%:*}"
+  age="${candidate#*:}"
+  printf 'killing stale remote sshd child pid=%s age=%ss\n' "$pid" "$age"
+  kill "$pid" 2>/dev/null || true
+done
+
+sleep 1
+
+if occupied; then
+  printf 'remote listener is still occupied after cleanup: %s:%s\n' "$listen_host" "$listen_port"
+  exit 75
+fi
+
+printf 'remote listener cleared: %s:%s\n' "$listen_host" "$listen_port"
+REMOTE
+}
+
+clear_remote_port_if_needed() {
+  [[ "$REMOTE_CLEANUP_ENABLED" == "1" ]] || return 0
+  remote_listener_occupied || return 0
+
+  log "remote listener is occupied at $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT; attempting stale cleanup"
+  local output=""
+  local code=0
+  set +e
+  output="$(clear_remote_port 2>&1)"
+  code=$?
+  set -e
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && log "remote cleanup: $line"
+  done <<< "$output"
+  return "$code"
+}
+
 notify() {
   local title="$1"
   local message="$2"
@@ -161,6 +304,67 @@ record_action() {
   } > "$ACTION_STATE"
 }
 
+write_status_report() {
+  ensure_dirs
+  local file="$APP_DIR/raghudt-tunnel-status.txt"
+  {
+    printf 'Hermit tunnel status\n'
+    printf 'Generated: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    status || true
+  } > "$file"
+  printf '%s\n' "$file"
+}
+
+write_diagnose_report() {
+  ensure_dirs
+  local file="$APP_DIR/raghudt-tunnel-diagnose.txt"
+  diagnose > "$file" 2>&1 || true
+  printf '%s\n' "$file"
+}
+
+write_logs_report() {
+  ensure_dirs
+  touch "$LOG_DIR/raghudt-tunnel.log" "$LOG_DIR/raghudt-tunnel.err.log"
+  local file="$APP_DIR/raghudt-tunnel-logs.txt"
+  {
+    printf 'Hermit tunnel logs\n'
+    printf 'Generated: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'Standard log: %s\n' "$LOG_DIR/raghudt-tunnel.log"
+    tail -n 200 "$LOG_DIR/raghudt-tunnel.log" 2>/dev/null || true
+    printf '\nError log: %s\n' "$LOG_DIR/raghudt-tunnel.err.log"
+    tail -n 200 "$LOG_DIR/raghudt-tunnel.err.log" 2>/dev/null || true
+  } > "$file"
+  printf '%s\n' "$file"
+}
+
+open_report() {
+  local file="$1"
+  /usr/bin/open -a TextEdit "$file"
+}
+
+show_status_report() {
+  local file
+  file="$(write_status_report)"
+  open_report "$file"
+  printf 'Opened status report: %s\n' "$file"
+}
+
+show_diagnose_report() {
+  local file
+  file="$(write_diagnose_report)"
+  open_report "$file"
+  printf 'Opened diagnosis report: %s\n' "$file"
+}
+
+show_logs_report() {
+  local file
+  file="$(write_logs_report)"
+  open_report "$file"
+  /usr/bin/open "$LOG_DIR" >/dev/null 2>&1 || true
+  printf 'Opened logs report: %s\n' "$file"
+  printf 'Opened log folder: %s\n' "$LOG_DIR"
+}
+
 swiftbar_action() {
   local command="${1:-}"
   if [[ -z "$command" ]]; then
@@ -173,7 +377,20 @@ swiftbar_action() {
   local output=""
   local code=0
   set +e
-  output="$("$0" "$command" 2>&1)"
+  case "$command" in
+    show-status)
+      output="$(show_status_report 2>&1)"
+      ;;
+    show-diagnose)
+      output="$(show_diagnose_report 2>&1)"
+      ;;
+    show-logs)
+      output="$(show_logs_report 2>&1)"
+      ;;
+    *)
+      output="$("$0" "$command" 2>&1)"
+      ;;
+  esac
   code=$?
   set -e
 
@@ -215,6 +432,11 @@ diagnose() {
   else
     printf '  local SSH: NOT reachable (%s:%s)\n' "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT"
   fi
+  if remote_listener_occupied; then
+    printf '  remote listener: occupied (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+  else
+    printf '  remote listener: clear (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+  fi
   printf '\n'
 
   printf 'LaunchAgent:\n'
@@ -250,6 +472,11 @@ run_once() {
 
   if ! /usr/bin/nc -G 2 -z "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" >/dev/null 2>&1; then
     log "local SSH is not reachable at $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT"
+    exit 75
+  fi
+
+  if ! clear_remote_port_if_needed; then
+    log "remote listener cleanup did not clear $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT; will retry later"
     exit 75
   fi
 
@@ -306,6 +533,18 @@ case "${1:-}" in
     ;;
   diagnose)
     diagnose
+    ;;
+  clear-remote-port)
+    clear_remote_port
+    ;;
+  show-status)
+    show_status_report
+    ;;
+  show-diagnose)
+    show_diagnose_report
+    ;;
+  show-logs)
+    show_logs_report
     ;;
   swiftbar-action)
     shift

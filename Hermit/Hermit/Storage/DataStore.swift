@@ -186,10 +186,13 @@ final class DataStore {
     }
 
     func favoriteTmuxShortcuts(limit: Int = 12, kind: TmuxShortcutKind? = nil) -> [TmuxShortcut] {
-        Array(
+        let knownHostIDs = Set(hosts.map(\.id))
+        return Array(
             tmuxShortcuts
                 .filter { shortcut in
-                    shortcut.isFavorite && (kind.map { shortcut.kind == $0 } ?? true)
+                    knownHostIDs.contains(shortcut.hostID) &&
+                        shortcut.isFavorite &&
+                        (kind.map { shortcut.kind == $0 } ?? true)
                 }
                 .sorted(by: compareShortcutsByRecentUse)
                 .prefix(limit)
@@ -197,10 +200,12 @@ final class DataStore {
     }
 
     func frequentTmuxShortcuts(limit: Int = 8, kind: TmuxShortcutKind? = nil) -> [TmuxShortcut] {
-        Array(
+        let knownHostIDs = Set(hosts.map(\.id))
+        return Array(
             tmuxShortcuts
                 .filter { shortcut in
-                    !shortcut.isFavorite &&
+                    knownHostIDs.contains(shortcut.hostID) &&
+                        !shortcut.isFavorite &&
                         shortcut.visitCount > 0 &&
                         (kind.map { shortcut.kind == $0 } ?? true)
                 }
@@ -212,6 +217,18 @@ final class DataStore {
                 }
                 .prefix(limit)
         )
+    }
+
+    @discardableResult
+    func removeTmuxShortcutsWithoutKnownHosts() -> Int {
+        let knownHostIDs = Set(hosts.map(\.id))
+        let originalCount = tmuxShortcuts.count
+        tmuxShortcuts.removeAll { !knownHostIDs.contains($0.hostID) }
+        let removedCount = originalCount - tmuxShortcuts.count
+        if removedCount > 0 {
+            save()
+        }
+        return removedCount
     }
 
     func removeTmuxShortcut(_ shortcut: TmuxShortcut) {
@@ -719,6 +736,21 @@ struct TmuxShortcut: Codable, Identifiable, Hashable {
 
     var systemImage: String {
         kind == .window ? "rectangle.split.3x1" : "terminal"
+    }
+
+    var navigationIdentity: String {
+        [
+            hostID.uuidString,
+            id.uuidString,
+            kind.rawValue,
+            sessionID,
+            sessionName,
+            windowID,
+            "\(windowIndex)",
+            windowName,
+            paneID ?? "",
+            paneIndex.map(String.init) ?? ""
+        ].joined(separator: "|")
     }
 
     func matches(_ other: TmuxShortcut) -> Bool {

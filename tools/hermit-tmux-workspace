@@ -1,0 +1,575 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import shutil
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from typing import Any
+
+
+APP_DIR = pathlib.Path.home() / ".config" / "hermit"
+DEFAULT_MANIFEST = APP_DIR / "tmux-workspace.json"
+DEFAULT_SESSION = "0"
+LOG_DIR = pathlib.Path.home() / "Library" / "Logs" / "Hermit"
+TMUX_BIN = os.environ.get("HERMIT_TMUX_BIN") or next(
+    (
+        str(candidate)
+        for candidate in (
+            pathlib.Path("/opt/homebrew/bin/tmux"),
+            pathlib.Path("/usr/local/bin/tmux"),
+            pathlib.Path("/usr/bin/tmux"),
+        )
+        if candidate.exists()
+    ),
+    shutil.which("tmux") or "tmux",
+)
+UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+class HermitTmuxError(RuntimeError):
+    pass
+
+
+def run(argv: list[str], *, check: bool = True, text: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, check=False, text=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise HermitTmuxError(f"{shlex.join(argv)} failed: {detail}")
+    return proc
+
+
+def tmux(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    return run([TMUX_BIN, *argv], check=check)
+
+
+def session_exists(session: str) -> bool:
+    return tmux(["has-session", "-t", session], check=False).returncode == 0
+
+
+def window_exists(session: str, name: str) -> bool:
+    return any(row.get("name") == name for row in list_windows(session))
+
+
+def shell_join(command: list[str]) -> str:
+    return shlex.join(command)
+
+
+def load_manifest(path: pathlib.Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "session": DEFAULT_SESSION, "windows": []}
+    with path.open() as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise HermitTmuxError(f"manifest must be a JSON object: {path}")
+    data.setdefault("version", 1)
+    data.setdefault("session", DEFAULT_SESSION)
+    data.setdefault("windows", [])
+    return data
+
+
+def save_manifest(path: pathlib.Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def parse_tmux_rows(output: str) -> list[dict[str, str]]:
+    rows = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 8:
+            continue
+        rows.append(
+            {
+                "session": parts[0],
+                "index": parts[1],
+                "name": parts[2],
+                "pane": parts[3],
+                "pane_pid": parts[4],
+                "cwd": parts[5],
+                "command": parts[6],
+                "title": parts[7],
+            }
+        )
+    return rows
+
+
+def list_windows(session: str) -> list[dict[str, str]]:
+    fmt = "\t".join(
+        [
+            "#{session_name}",
+            "#{window_index}",
+            "#{window_name}",
+            "#{pane_id}",
+            "#{pane_pid}",
+            "#{pane_current_path}",
+            "#{pane_current_command}",
+            "#{pane_title}",
+        ]
+    )
+    proc = tmux(["list-windows", "-t", session, "-F", fmt], check=False)
+    if proc.returncode != 0:
+        return []
+    return parse_tmux_rows(proc.stdout)
+
+
+def current_window() -> dict[str, str]:
+    if "TMUX_PANE" not in os.environ:
+        raise HermitTmuxError("add-current must be run inside tmux")
+    fmt = "\t".join(
+        [
+            "#{session_name}",
+            "#{window_index}",
+            "#{window_name}",
+            "#{pane_id}",
+            "#{pane_pid}",
+            "#{pane_current_path}",
+            "#{pane_current_command}",
+            "#{pane_title}",
+        ]
+    )
+    proc = tmux(["display-message", "-p", fmt])
+    rows = parse_tmux_rows(proc.stdout)
+    if not rows:
+        raise HermitTmuxError("could not read current tmux window")
+    return rows[0]
+
+
+def process_table() -> tuple[dict[int, list[int]], dict[int, str]]:
+    proc = run(["ps", "-axo", "pid=,ppid=,command="])
+    children: dict[int, list[int]] = {}
+    commands: dict[int, str] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        command = parts[2] if len(parts) > 2 else ""
+        children.setdefault(ppid, []).append(pid)
+        commands[pid] = command
+    return children, commands
+
+
+def descendants(root_pid: int, children: dict[int, list[int]]) -> list[int]:
+    found: list[int] = []
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        for child in children.get(pid, []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def first_uuid(value: str) -> str | None:
+    match = UUID_RE.search(value)
+    return match.group(0) if match else None
+
+
+def claude_session_from_pid(pid: int) -> dict[str, Any] | None:
+    path = pathlib.Path.home() / ".claude" / "sessions" / f"{pid}.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open() as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    session_id = data.get("sessionId")
+    if not session_id:
+        return None
+    return data
+
+
+def codex_session_from_lsof(pid: int) -> str | None:
+    proc = run(["lsof", "-Fn", "-p", str(pid)], check=False)
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        if "/.codex/sessions/" not in line or "rollout-" not in line:
+            continue
+        session_id = first_uuid(line)
+        if session_id:
+            return session_id
+    return None
+
+
+def codex_latest_for_cwd(cwd: str) -> str | None:
+    db = pathlib.Path.home() / ".codex" / "state_5.sqlite"
+    if not db.exists():
+        return None
+    con = sqlite3.connect(str(db))
+    try:
+        row = con.execute(
+            """
+            select id
+            from threads
+            where archived = 0 and source = 'cli' and cwd = ?
+            order by updated_at_ms desc
+            limit 1
+            """,
+            (cwd,),
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def resolve_window(row: dict[str, str], *, allow_codex_latest: bool = True) -> dict[str, Any]:
+    try:
+        pane_pid = int(row["pane_pid"])
+    except ValueError:
+        pane_pid = -1
+    children, commands = process_table()
+    pids = [pane_pid, *descendants(pane_pid, children)]
+
+    for pid in pids:
+        cmd = commands.get(pid, "")
+        base = pathlib.Path(cmd.split()[0]).name if cmd.split() else ""
+        if base == "claude":
+            session = claude_session_from_pid(pid)
+            if session:
+                session_id = session["sessionId"]
+                name = session.get("name")
+                command = ["claude", "--resume", session_id]
+                if name:
+                    command.extend(["--name", name])
+                return {
+                    "name": row["name"],
+                    "cwd": session.get("cwd") or row["cwd"],
+                    "agent": "claude",
+                    "resume_id": session_id,
+                    "command": command,
+                    "title": row.get("title", ""),
+                }
+
+    for pid in pids:
+        cmd = commands.get(pid, "")
+        if "codex" in cmd:
+            session_id = codex_session_from_lsof(pid)
+            if not session_id and allow_codex_latest:
+                session_id = codex_latest_for_cwd(row["cwd"])
+            if session_id:
+                return {
+                    "name": row["name"],
+                    "cwd": row["cwd"],
+                    "agent": "codex",
+                    "resume_id": session_id,
+                    "command": ["codex", "resume", session_id],
+                    "title": row.get("title", ""),
+                }
+
+    return {
+        "name": row["name"],
+        "cwd": row["cwd"],
+        "agent": "shell",
+        "command": ["bash", "-l"],
+        "title": row.get("title", ""),
+    }
+
+
+def merge_window(manifest: dict[str, Any], window: dict[str, Any]) -> None:
+    windows = manifest.setdefault("windows", [])
+    for idx, existing in enumerate(windows):
+        if existing.get("name") == window.get("name"):
+            windows[idx] = window
+            return
+    windows.append(window)
+
+
+def command_capture_current(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    manifest["session"] = args.target_session or manifest.get("session") or DEFAULT_SESSION
+    rows = list_windows(args.source_session)
+    manifest["windows"] = [
+        resolve_window(row, allow_codex_latest=not args.no_codex_latest)
+        for row in rows
+    ]
+    save_manifest(args.manifest, manifest)
+    print(f"captured {len(manifest['windows'])} windows to {args.manifest}")
+    return 0
+
+
+def command_add_current(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    row = current_window()
+    if args.target_session:
+        manifest["session"] = args.target_session
+    window = resolve_window(row, allow_codex_latest=not args.no_codex_latest)
+    merge_window(manifest, window)
+    save_manifest(args.manifest, manifest)
+    print(f"added/updated window {window['name']} in {args.manifest}")
+    return 0
+
+
+def command_remove(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    before = len(manifest.get("windows", []))
+    manifest["windows"] = [w for w in manifest.get("windows", []) if w.get("name") != args.name]
+    save_manifest(args.manifest, manifest)
+    print(f"removed {before - len(manifest['windows'])} window(s) named {args.name}")
+    return 0
+
+
+def command_list(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    print(f"manifest: {args.manifest}")
+    print(f"session: {manifest.get('session', DEFAULT_SESSION)}")
+    for window in manifest.get("windows", []):
+        print(
+            f"{window.get('name')} | cwd={window.get('cwd')} | "
+            f"agent={window.get('agent')} | resume_id={window.get('resume_id', '')}"
+        )
+    return 0
+
+
+def create_session(session: str, first: dict[str, Any] | None) -> None:
+    if first:
+        cwd = first.get("cwd") or str(pathlib.Path.home())
+        name = first.get("name") or "shell"
+        tmux(["new-session", "-d", "-s", session, "-n", name, "-c", cwd])
+        mark_window(session, name, first)
+        send_restore_command(session, name, first)
+    else:
+        tmux(["new-session", "-d", "-s", session, "-n", "shell"])
+
+
+def mark_window(session: str, name: str, window: dict[str, Any]) -> None:
+    target = f"{session}:{name}"
+    tmux(["set-option", "-w", "-t", target, "@hermit_tmux_managed", "1"], check=False)
+    tmux(["set-option", "-w", "-t", target, "@hermit_tmux_agent", str(window.get("agent", ""))], check=False)
+    tmux(["set-option", "-w", "-t", target, "@hermit_tmux_resume_id", str(window.get("resume_id", ""))], check=False)
+
+
+def is_window_managed(session: str, name: str) -> bool:
+    proc = tmux(["show-option", "-wqv", "-t", f"{session}:{name}", "@hermit_tmux_managed"], check=False)
+    return proc.returncode == 0 and proc.stdout.strip() == "1"
+
+
+def active_command(session: str, name: str) -> str:
+    proc = tmux(["display-message", "-p", "-t", f"{session}:{name}", "#{pane_current_command}"], check=False)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def send_restore_command(session: str, name: str, window: dict[str, Any]) -> None:
+    command = window.get("command")
+    if not isinstance(command, list) or not command:
+        return
+    tmux(["send-keys", "-t", f"{session}:{name}", shell_join([str(x) for x in command]), "C-m"])
+
+
+def start_workspace(manifest: dict[str, Any], *, repair_idle: bool = True) -> list[str]:
+    session = str(manifest.get("session") or DEFAULT_SESSION)
+    windows = list(manifest.get("windows", []))
+    actions: list[str] = []
+
+    if not session_exists(session):
+        first = windows[0] if windows else None
+        create_session(session, first)
+        if first:
+            actions.append(f"created session {session} with window {first.get('name')}")
+            windows = windows[1:]
+        else:
+            actions.append(f"created empty session {session}")
+
+    for window in windows:
+        name = str(window.get("name") or "shell")
+        cwd = str(window.get("cwd") or pathlib.Path.home())
+        if not window_exists(session, name):
+            tmux(["new-window", "-d", "-t", session, "-n", name, "-c", cwd])
+            mark_window(session, name, window)
+            send_restore_command(session, name, window)
+            actions.append(f"created window {name}")
+            continue
+
+        if is_window_managed(session, name) and repair_idle:
+            cmd = active_command(session, name)
+            if cmd in {"bash", "zsh", "sh", "fish", "login"}:
+                send_restore_command(session, name, window)
+                actions.append(f"restarted idle managed window {name}")
+            else:
+                actions.append(f"left running managed window {name} ({cmd})")
+        else:
+            actions.append(f"left existing window {name}")
+
+    return actions
+
+
+def command_start(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    actions = start_workspace(manifest, repair_idle=not args.no_repair_idle)
+    for action in actions:
+        print(action)
+    return 0
+
+
+def command_attach(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    start_workspace(manifest, repair_idle=not args.no_repair_idle)
+    session = str(manifest.get("session") or DEFAULT_SESSION)
+    os.execv(TMUX_BIN, [TMUX_BIN, "attach-session", "-t", session])
+    return 0
+
+
+def command_status(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest)
+    session = str(manifest.get("session") or DEFAULT_SESSION)
+    print(f"manifest: {args.manifest}")
+    print(f"session: {session}")
+    if not session_exists(session):
+        print("tmux: missing")
+        return 1
+
+    print("tmux: present")
+    live = {row["name"]: row for row in list_windows(session)}
+    for window in manifest.get("windows", []):
+        name = str(window.get("name"))
+        row = live.get(name)
+        if row:
+            managed = "managed" if is_window_managed(session, name) else "existing"
+            print(f"{name}: {managed}, command={row.get('command')}, title={row.get('title')}")
+        else:
+            print(f"{name}: missing")
+    return 0
+
+
+def command_init(args: argparse.Namespace) -> int:
+    if args.manifest.exists() and not args.force:
+        print(f"manifest already exists: {args.manifest}")
+        return 0
+    data = {"version": 1, "session": args.session, "windows": []}
+    save_manifest(args.manifest, data)
+    print(f"created {args.manifest}")
+    return 0
+
+
+def command_edit(args: argparse.Namespace) -> int:
+    args.manifest.parent.mkdir(parents=True, exist_ok=True)
+    if not args.manifest.exists():
+        save_manifest(args.manifest, {"version": 1, "session": DEFAULT_SESSION, "windows": []})
+    editor = os.environ.get("EDITOR") or "open"
+    if editor == "open":
+        subprocess.call(["open", str(args.manifest)])
+    else:
+        subprocess.call([editor, str(args.manifest)])
+    return 0
+
+
+def command_install_agent(args: argparse.Namespace) -> int:
+    src = pathlib.Path(args.plist_source)
+    dest = pathlib.Path.home() / "Library" / "LaunchAgents" / "com.raghu.hermit-tmux-workspace.plist"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    text = src.read_text()
+    text = text.replace("__MANIFEST__", str(args.manifest))
+    dest.write_text(text)
+    subprocess.run(["plutil", "-lint", str(dest)], check=True)
+    os.chmod(dest, 0o644)
+    print(f"installed {dest}")
+    if args.bootstrap:
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(["launchctl", "bootout", f"{domain}/com.raghu.hermit-tmux-workspace"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["launchctl", "bootstrap", domain, str(dest)], check=True)
+        print("bootstrapped LaunchAgent")
+    return 0
+
+
+def add_manifest_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--manifest",
+        type=pathlib.Path,
+        default=pathlib.Path(os.environ.get("HERMIT_TMUX_MANIFEST", DEFAULT_MANIFEST)),
+        help=f"workspace manifest path (default: {DEFAULT_MANIFEST})",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Hermit tmux workspace restore manager")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init")
+    add_manifest_arg(p)
+    p.add_argument("--session", default=DEFAULT_SESSION)
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=command_init)
+
+    p = sub.add_parser("capture-current")
+    add_manifest_arg(p)
+    p.add_argument("--source-session", default=DEFAULT_SESSION)
+    p.add_argument("--target-session")
+    p.add_argument("--no-codex-latest", action="store_true")
+    p.set_defaults(func=command_capture_current)
+
+    p = sub.add_parser("add-current")
+    add_manifest_arg(p)
+    p.add_argument("--target-session")
+    p.add_argument("--no-codex-latest", action="store_true")
+    p.set_defaults(func=command_add_current)
+
+    p = sub.add_parser("remove")
+    add_manifest_arg(p)
+    p.add_argument("name")
+    p.set_defaults(func=command_remove)
+
+    p = sub.add_parser("list")
+    add_manifest_arg(p)
+    p.set_defaults(func=command_list)
+
+    p = sub.add_parser("start")
+    add_manifest_arg(p)
+    p.add_argument("--no-repair-idle", action="store_true")
+    p.set_defaults(func=command_start)
+
+    p = sub.add_parser("attach")
+    add_manifest_arg(p)
+    p.add_argument("--no-repair-idle", action="store_true")
+    p.set_defaults(func=command_attach)
+
+    p = sub.add_parser("status")
+    add_manifest_arg(p)
+    p.set_defaults(func=command_status)
+
+    p = sub.add_parser("edit")
+    add_manifest_arg(p)
+    p.set_defaults(func=command_edit)
+
+    p = sub.add_parser("install-agent")
+    add_manifest_arg(p)
+    p.add_argument(
+        "--plist-source",
+        default="/Users/raghu/tmp/Hermit-tmux/launchd/com.raghu.hermit-tmux-workspace.plist",
+    )
+    p.add_argument("--bootstrap", action="store_true")
+    p.set_defaults(func=command_install_agent)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except HermitTmuxError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
