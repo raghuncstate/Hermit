@@ -673,6 +673,16 @@ struct WindowDetailView: View {
                 .onSubmit(sendEnter)
 
             Button {
+                clearCommandBox()
+            } label: {
+                Image(systemName: "delete.left.fill")
+                    .frame(width: 34, height: 36)
+            }
+            .buttonStyle(.bordered)
+            .disabled(commandText.isEmpty && streamedInputText.isEmpty)
+            .accessibilityLabel("Clear Command")
+
+            Button {
                 let settings = AppSettings.load()
                 voiceCoordinator.handleVoiceButton(settings: settings)
             } label: {
@@ -763,21 +773,55 @@ struct WindowDetailView: View {
         }
     }
 
+    private func clearCommandBox() {
+        commandIdleSubmitTask?.cancel()
+        let pendingText = streamedInputText
+
+        suppressInputChange = true
+        commandText = ""
+        streamedInputText = ""
+        DispatchQueue.main.async {
+            suppressInputChange = false
+        }
+
+        guard !pendingText.isEmpty, let pane = selectedPane else { return }
+        resumeFollowForInput(pane)
+        Task {
+            await model.sendInputDelta(
+                backspaceCount: pendingText.count,
+                insertedText: "",
+                enter: false,
+                to: pane
+            )
+        }
+    }
+
     private func sendCommandText(_ command: String, to pane: TmuxPane) {
         let cleanedCommand = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: command).command
         guard !cleanedCommand.isEmpty else { return }
 
+        commandIdleSubmitTask?.cancel()
         resumeFollowForInput(pane)
-        Task { await model.sendCommand(cleanedCommand, to: pane) }
+        Task {
+            await model.sendInputDelta(
+                backspaceCount: 0,
+                insertedText: cleanedCommand,
+                enter: true,
+                to: pane
+            )
+        }
     }
 
     private func shouldScheduleCommandIdleSubmit(
         delta: (backspaceCount: Int, insertedText: String),
         command: String
     ) -> Bool {
-        !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && delta.backspaceCount == 0
-            && VoiceCommandAutoSubmit.insertedTextLooksDictated(delta.insertedText)
+        VoiceCommandAutoSubmit.shouldScheduleIdleSubmit(
+            backspaceCount: delta.backspaceCount,
+            insertedText: delta.insertedText,
+            command: command,
+            alreadyArmed: commandIdleSubmitTask != nil
+        )
     }
 
     private func scheduleCommandIdleSubmit(for command: String) {

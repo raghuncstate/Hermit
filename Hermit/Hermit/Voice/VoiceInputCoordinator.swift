@@ -52,4 +52,20 @@ enum VoiceCommandAutoSubmit {
 
         return cleaned.count >= 4 || cleaned.contains { $0.isWhitespace }
     }
+
+    static func shouldScheduleIdleSubmit(
+        backspaceCount: Int,
+        insertedText: String,
+        command: String,
+        alreadyArmed: Bool
+    ) -> Bool {
+        let cleanedCommand = cleanCommand(command)
+        guard !cleanedCommand.isEmpty else { return false }
+
+        if insertedTextLooksDictated(insertedText) {
+            return true
+        }
+
+        return alreadyArmed && backspaceCount > 0
+    }
 }

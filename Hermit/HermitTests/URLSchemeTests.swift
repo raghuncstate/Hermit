@@ -59,4 +59,36 @@ struct URLSchemeTests {
         #expect(VoiceCommandAutoSubmit.insertedTextLooksDictated("hello"))
         #expect(!VoiceCommandAutoSubmit.insertedTextLooksDictated("g"))
     }
+
+    @Test func schedulesIdleSubmitForDictatedCorrection() {
+        #expect(VoiceCommandAutoSubmit.shouldScheduleIdleSubmit(
+            backspaceCount: 0,
+            insertedText: "git status",
+            command: "git status",
+            alreadyArmed: false
+        ))
+
+        #expect(VoiceCommandAutoSubmit.shouldScheduleIdleSubmit(
+            backspaceCount: 2,
+            insertedText: "tus",
+            command: "git status",
+            alreadyArmed: true
+        ))
+    }
+
+    @Test func doesNotIdleSubmitShortManualTyping() {
+        #expect(!VoiceCommandAutoSubmit.shouldScheduleIdleSubmit(
+            backspaceCount: 0,
+            insertedText: "g",
+            command: "g",
+            alreadyArmed: false
+        ))
+
+        #expect(!VoiceCommandAutoSubmit.shouldScheduleIdleSubmit(
+            backspaceCount: 1,
+            insertedText: "",
+            command: "",
+            alreadyArmed: true
+        ))
+    }
 }
