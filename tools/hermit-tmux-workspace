@@ -260,12 +260,12 @@ def resolve_window(row: dict[str, str], *, allow_codex_latest: bool = True) -> d
                     "title": row.get("title", ""),
                 }
 
+    codex_pids: list[int] = []
     for pid in pids:
         cmd = commands.get(pid, "")
         if "codex" in cmd:
+            codex_pids.append(pid)
             session_id = codex_session_from_lsof(pid)
-            if not session_id and allow_codex_latest:
-                session_id = codex_latest_for_cwd(row["cwd"])
             if session_id:
                 return {
                     "name": row["name"],
@@ -275,6 +275,18 @@ def resolve_window(row: dict[str, str], *, allow_codex_latest: bool = True) -> d
                     "command": ["codex", "resume", session_id],
                     "title": row.get("title", ""),
                 }
+
+    if codex_pids and allow_codex_latest:
+        session_id = codex_latest_for_cwd(row["cwd"])
+        if session_id:
+            return {
+                "name": row["name"],
+                "cwd": row["cwd"],
+                "agent": "codex",
+                "resume_id": session_id,
+                "command": ["codex", "resume", session_id],
+                "title": row.get("title", ""),
+            }
 
     return {
         "name": row["name"],
