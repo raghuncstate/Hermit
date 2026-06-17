@@ -3,26 +3,23 @@ set -euo pipefail
 
 LABEL="com.raghu.hermit-raghudt-tunnel"
 REMOTE_USER="${HERMIT_TUNNEL_REMOTE_USER:-raghupathyk}"
-REMOTE_HOST="${HERMIT_TUNNEL_REMOTE_HOST:-10.110.49.244}"
+REMOTE_HOST="${HERMIT_TUNNEL_REMOTE_HOST:-raghudt}"
 REMOTE_PORT="${HERMIT_TUNNEL_REMOTE_PORT:-22}"
 REMOTE_LISTEN_HOST="${HERMIT_TUNNEL_REMOTE_LISTEN_HOST:-127.0.0.1}"
-REMOTE_LISTEN_PORT="${HERMIT_TUNNEL_REMOTE_LISTEN_PORT:-22220}"
+REMOTE_LISTEN_PORT="${HERMIT_TUNNEL_REMOTE_LISTEN_PORT:-22221}"
 LOCAL_TARGET_HOST="${HERMIT_TUNNEL_LOCAL_TARGET_HOST:-127.0.0.1}"
 LOCAL_TARGET_PORT="${HERMIT_TUNNEL_LOCAL_TARGET_PORT:-22}"
 IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
 REMOTE_CLEANUP_ENABLED="${HERMIT_TUNNEL_REMOTE_CLEANUP_ENABLED:-1}"
-REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/id_rsa}"
+REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
 REMOTE_CLEANUP_MIN_AGE_SECONDS="${HERMIT_TUNNEL_REMOTE_CLEANUP_MIN_AGE_SECONDS:-120}"
 APP_DIR="$HOME/Library/Application Support/Hermit"
 LOG_DIR="$HOME/Library/Logs/Hermit"
 CONTROL_SOCKET="$APP_DIR/raghudt-tunnel.ctl"
 ACTION_STATE="$APP_DIR/raghudt-tunnel.last-action"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_PLIST_SOURCE="$SCRIPT_DIR/../launchd/$LABEL.plist"
-if [[ ! -f "$DEFAULT_PLIST_SOURCE" ]]; then
-  DEFAULT_PLIST_SOURCE="/Users/raghu/tmp/Hermit-tmux/launchd/$LABEL.plist"
-fi
-PLIST_SOURCE="${HERMIT_TUNNEL_PLIST_SOURCE:-$DEFAULT_PLIST_SOURCE}"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+PLIST_SOURCE="${HERMIT_TUNNEL_PLIST_SOURCE:-}"
 PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
@@ -75,13 +72,74 @@ master_connected() {
     "$REMOTE_USER@$REMOTE_HOST" >/dev/null 2>&1
 }
 
+plist_escape() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  value="${value//\"/&quot;}"
+  printf '%s' "$value"
+}
+
+write_generated_plist() {
+  local launch_path="${HERMIT_TUNNEL_LAUNCH_PATH:-$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+
+  {
+    cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(plist_escape "$LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(plist_escape "$SCRIPT_PATH")</string>
+    <string>run-once</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMIT_TUNNEL_REMOTE_HOST</key>
+    <string>$(plist_escape "$REMOTE_HOST")</string>
+    <key>HERMIT_TUNNEL_REMOTE_LISTEN_PORT</key>
+    <string>$(plist_escape "$REMOTE_LISTEN_PORT")</string>
+    <key>HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE</key>
+    <string>$(plist_escape "$REMOTE_CLEANUP_IDENTITY_FILE")</string>
+    <key>PATH</key>
+    <string>$(plist_escape "$launch_path")</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>NetworkState</key>
+    <true/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>$(plist_escape "$LOG_DIR/raghudt-tunnel.log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(plist_escape "$LOG_DIR/raghudt-tunnel.err.log")</string>
+</dict>
+</plist>
+PLIST
+  } > "$PLIST_DEST"
+}
+
 install_agent() {
   ensure_dirs
-  if [[ ! -f "$PLIST_SOURCE" ]]; then
-    printf 'Missing LaunchAgent source: %s\n' "$PLIST_SOURCE" >&2
-    return 1
+  if [[ -n "$PLIST_SOURCE" ]]; then
+    if [[ ! -f "$PLIST_SOURCE" ]]; then
+      printf 'Missing LaunchAgent source: %s\n' "$PLIST_SOURCE" >&2
+      return 1
+    fi
+    cp "$PLIST_SOURCE" "$PLIST_DEST"
+  else
+    write_generated_plist
   fi
-  cp "$PLIST_SOURCE" "$PLIST_DEST"
   plutil -lint "$PLIST_DEST" >/dev/null
   chmod 644 "$PLIST_DEST"
   printf 'Installed %s\n' "$PLIST_DEST"
@@ -89,15 +147,11 @@ install_agent() {
 
 start_agent() {
   install_agent >/dev/null
-  if master_connected; then
-    status
-    return 0
-  fi
-
   if loaded; then
-    launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+  else
+    launchctl bootstrap "$DOMAIN" "$PLIST_DEST"
   fi
-  launchctl bootstrap "$DOMAIN" "$PLIST_DEST"
   sleep 1
   status || true
 }
@@ -172,12 +226,8 @@ remote_cleanup_ssh() {
   /usr/bin/ssh "${args[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
 }
 
-remote_listener_status() {
-  local output=""
-  local code=0
-
-  set +e
-  output="$(remote_cleanup_ssh /usr/bin/python3 - "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'PY' 2>&1
+remote_listener_occupied() {
+  remote_cleanup_ssh /usr/bin/python3 - "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 
@@ -186,31 +236,9 @@ port = int(sys.argv[2])
 try:
     with socket.create_connection((host, port), timeout=2):
         pass
-    print("HERMIT_PROBE_OCCUPIED")
 except OSError:
-    print("HERMIT_PROBE_CLEAR")
+    raise SystemExit(1)
 PY
-)"
-  code=$?
-  set -e
-
-  if [[ "$code" -ne 0 ]]; then
-    [[ -n "$output" ]] && printf '%s\n' "$output" >&2
-    return 75
-  fi
-  if grep -qx 'HERMIT_PROBE_OCCUPIED' <<< "$output"; then
-    return 0
-  fi
-  if grep -qx 'HERMIT_PROBE_CLEAR' <<< "$output"; then
-    return 1
-  fi
-
-  [[ -n "$output" ]] && printf '%s\n' "$output" >&2
-  return 75
-}
-
-remote_listener_occupied() {
-  remote_listener_status
 }
 
 clear_remote_port() {
@@ -219,35 +247,15 @@ clear_remote_port() {
     return 75
   fi
 
-  if master_connected; then
-    printf 'current tunnel is connected; not clearing remote listener: %s:%s\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-    return 0
-  fi
-
   if ! /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
     printf 'raghudt is not reachable at %s:%s; cannot clear remote port\n' "$REMOTE_HOST" "$REMOTE_PORT"
     return 75
   fi
 
-  local probe_output=""
-  local probe_code=0
-  set +e
-  probe_output="$(remote_listener_status 2>&1)"
-  probe_code=$?
-  set -e
-  case "$probe_code" in
-    0)
-      ;;
-    1)
-      printf 'remote listener is already clear: %s:%s\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-      return 0
-      ;;
-    *)
-      printf 'remote listener probe failed for %s:%s\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-      [[ -n "$probe_output" ]] && printf '%s\n' "$probe_output"
-      return 75
-      ;;
-  esac
+  if ! remote_listener_occupied; then
+    printf 'remote listener is already clear: %s:%s\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+    return 0
+  fi
 
   remote_cleanup_ssh /bin/bash -s -- \
     "$REMOTE_LISTEN_HOST" \
@@ -260,7 +268,6 @@ listen_host="$1"
 listen_port="$2"
 min_age="$3"
 remote_user="$4"
-remote_uid="$(id -u "$remote_user" 2>/dev/null || id -u)"
 
 occupied() {
   /usr/bin/python3 - "$listen_host" "$listen_port" <<'PY' >/dev/null 2>&1
@@ -277,113 +284,43 @@ except OSError:
 PY
 }
 
-listener_pids() {
-  local pids=()
-
-  if command -v ss >/dev/null 2>&1; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] || continue
-      if [[ "$line" != *":$listen_port "* && "$line" != *":$listen_port"* ]]; then
-        continue
-      fi
-      while [[ "$line" =~ pid=([0-9]+) ]]; do
-        pids+=("${BASH_REMATCH[1]}")
-        line="${line#*pid=${BASH_REMATCH[1]}}"
-      done
-    done < <(ss -H -ltnp "sport = :$listen_port" 2>/dev/null || true)
-  fi
-
-  if [[ ${#pids[@]} -eq 0 ]] && command -v lsof >/dev/null 2>&1; then
-    while IFS= read -r pid; do
-      [[ "$pid" =~ ^[0-9]+$ ]] && pids+=("$pid")
-    done < <(lsof -nP -iTCP@"$listen_host":"$listen_port" -sTCP:LISTEN -t 2>/dev/null || true)
-  fi
-
-  if [[ ${#pids[@]} -eq 0 ]] && command -v fuser >/dev/null 2>&1; then
-    while IFS= read -r pid; do
-      [[ "$pid" =~ ^[0-9]+$ ]] && pids+=("$pid")
-    done < <(fuser -n tcp "$listen_port" 2>/dev/null | tr ' ' '\n' || true)
-  fi
-
-  if [[ ${#pids[@]} -gt 0 ]]; then
-    printf '%s\n' "${pids[@]}" | awk '!seen[$0]++'
-  fi
-}
-
-set +e
-occupied
-probe_code=$?
-set -e
-if [[ "$probe_code" -eq 1 ]]; then
+if ! occupied; then
   printf 'remote listener is already clear: %s:%s\n' "$listen_host" "$listen_port"
   exit 0
-elif [[ "$probe_code" -ne 0 ]]; then
-  printf 'remote listener probe failed before cleanup: %s:%s\n' "$listen_host" "$listen_port"
-  exit 75
 fi
 
 mapfile -t candidates < <(
-  while IFS= read -r pid; do
-    [[ "$pid" =~ ^[0-9]+$ ]] || continue
-
-    line="$(ps -o uid=,etimes=,comm=,args= -p "$pid" 2>/dev/null || true)"
-    [[ -n "$line" ]] || continue
-
-    uid="$(awk '{print $1}' <<< "$line")"
-    etimes="$(awk '{print $2}' <<< "$line")"
-    comm="$(awk '{print $3}' <<< "$line")"
-    args="$(cut -d' ' -f4- <<< "$line" | sed 's/^[[:space:]]*//')"
-
-    if [[ "$uid" != "$remote_uid" && "$uid" != "$(id -u)" ]]; then
-      printf 'skip pid=%s: owned by uid %s, not %s\n' "$pid" "$uid" "$remote_uid" >&2
-      continue
-    fi
-    if [[ ! "$etimes" =~ ^[0-9]+$ || "$etimes" -lt "$min_age" ]]; then
-      printf 'skip pid=%s: age %ss is younger than %ss\n' "$pid" "${etimes:-unknown}" "$min_age" >&2
-      continue
-    fi
-    is_ssh_listener=0
-    is_socat_listener=0
-    if [[ "$comm" == *ssh* || "$args" == *ssh* ]]; then
-      is_ssh_listener=1
-    fi
-    if [[ "$comm" == "socat" && "$args" == *"TCP-LISTEN:$listen_port"* && "$args" == *"bind=$listen_host"* ]]; then
-      is_socat_listener=1
-    fi
-    if [[ "$is_ssh_listener" != "1" && "$is_socat_listener" != "1" ]]; then
-      printf 'skip pid=%s: listener is not an expected Hermit SSH/socat listener: %s\n' "$pid" "$args" >&2
-      continue
-    fi
-
-    printf '%s:%s:%s\n' "$pid" "$etimes" "$args"
-  done < <(listener_pids)
+  ps -u "$USER" -o pid=,etimes=,args= |
+    awk -v min_age="$min_age" -v remote_user="$remote_user" '
+      {
+        pid=$1
+        etimes=$2
+        $1=""
+        $2=""
+        sub(/^  */, "")
+        if ($0 == "sshd: " remote_user && etimes >= min_age) {
+          print pid ":" etimes
+        }
+      }
+    '
 )
 
 if [[ ${#candidates[@]} -eq 0 ]]; then
-  printf 'remote listener is occupied, but no safe stale Hermit listener candidate was found\n'
+  printf 'remote listener is occupied, but no old Hermit-shaped sshd child was found\n'
   exit 75
 fi
 
 for candidate in "${candidates[@]}"; do
   pid="${candidate%%:*}"
-  rest="${candidate#*:}"
-  age="${rest%%:*}"
-  args="${rest#*:}"
-  printf 'killing stale remote ssh listener pid=%s age=%ss args=%s\n' "$pid" "$age" "$args"
+  age="${candidate#*:}"
+  printf 'killing stale remote sshd child pid=%s age=%ss\n' "$pid" "$age"
   kill "$pid" 2>/dev/null || true
 done
 
 sleep 1
 
-set +e
-occupied
-probe_code=$?
-set -e
-if [[ "$probe_code" -eq 0 ]]; then
+if occupied; then
   printf 'remote listener is still occupied after cleanup: %s:%s\n' "$listen_host" "$listen_port"
-  exit 75
-elif [[ "$probe_code" -ne 1 ]]; then
-  printf 'remote listener probe failed after cleanup: %s:%s\n' "$listen_host" "$listen_port"
   exit 75
 fi
 
@@ -393,26 +330,7 @@ REMOTE
 
 clear_remote_port_if_needed() {
   [[ "$REMOTE_CLEANUP_ENABLED" == "1" ]] || return 0
-  local probe_output=""
-  local probe_code=0
-  set +e
-  probe_output="$(remote_listener_status 2>&1)"
-  probe_code=$?
-  set -e
-  case "$probe_code" in
-    0)
-      ;;
-    1)
-      return 0
-      ;;
-    *)
-      log "remote listener probe failed for $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT"
-      while IFS= read -r line; do
-        [[ -n "$line" ]] && log "remote probe: $line"
-      done <<< "$probe_output"
-      return 75
-      ;;
-  esac
+  remote_listener_occupied || return 0
 
   log "remote listener is occupied at $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT; attempting stale cleanup"
   local output=""
@@ -572,24 +490,11 @@ diagnose() {
   else
     printf '  local SSH: NOT reachable (%s:%s)\n' "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT"
   fi
-  local diagnose_probe_output=""
-  local diagnose_probe_code=0
-  set +e
-  diagnose_probe_output="$(remote_listener_status 2>&1)"
-  diagnose_probe_code=$?
-  set -e
-  case "$diagnose_probe_code" in
-    0)
-      printf '  remote listener: occupied (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-      ;;
-    1)
-      printf '  remote listener: clear (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-      ;;
-    *)
-      printf '  remote listener: probe failed (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
-      [[ -n "$diagnose_probe_output" ]] && printf '%s\n' "$diagnose_probe_output" | sed 's/^/    /'
-      ;;
-  esac
+  if remote_listener_occupied; then
+    printf '  remote listener: occupied (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+  else
+    printf '  remote listener: clear (%s:%s)\n' "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT"
+  fi
   printf '\n'
 
   printf 'LaunchAgent:\n'
