@@ -292,4 +292,42 @@ struct DataStoreTests {
         #expect(raghudtShortcut.navigationIdentity.contains(raghudt.id.uuidString))
         #expect(macShortcut.navigationIdentity.contains(mac.id.uuidString))
     }
+
+    @Test func loadSeedsNewMacReverseTunnelProfileFromRaghudt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HermitDataStoreTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fileURL = directory.appendingPathComponent("hermit-data.json")
+        let raghudt = Host(
+            displayName: "raghudt",
+            hostname: "10.110.49.244",
+            username: "raghupathyk",
+            privateKeyRef: "iphone-key-ref"
+        )
+        let backup = BackupData(
+            version: 1,
+            exportedAt: Date(timeIntervalSince1970: 0),
+            hosts: [raghudt],
+            sessions: []
+        )
+        try JSONEncoder.hermit.encode(backup).write(to: fileURL)
+
+        let store = DataStore(localFileURL: fileURL, startWatching: false)
+
+        let newMac = try #require(store.hosts.first { $0.displayName == "New Mac via raghudt" })
+        #expect(newMac.hostname == "127.0.0.1")
+        #expect(newMac.port == 22221)
+        #expect(newMac.username == "raghupathyk")
+        #expect(newMac.privateKeyRef == "iphone-key-ref")
+        #expect(newMac.defaultTmuxSessionName == "0")
+        #expect(newMac.tmuxCommand == "/Users/raghupathyk/.local/bin/tmux")
+        #expect(newMac.jumpHost == SSHJumpHost(
+            hostname: "10.110.49.244",
+            port: 22,
+            username: "raghupathyk",
+            privateKeyRef: "iphone-key-ref"
+        ))
+    }
 }

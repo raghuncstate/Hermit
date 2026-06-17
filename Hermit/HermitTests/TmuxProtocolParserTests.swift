@@ -58,6 +58,14 @@ final class TmuxProtocolParserTests: XCTestCase {
             TmuxLaunchCommand.interactive(sessionName: "0", socketName: nil),
             "tmux new-session -As '0'"
         )
+        XCTAssertEqual(
+            TmuxLaunchCommand.interactive(
+                sessionName: "0",
+                socketName: nil,
+                tmuxCommand: "/Users/raghupathyk/.local/bin/tmux"
+            ),
+            "'/Users/raghupathyk/.local/bin/tmux' new-session -As '0'"
+        )
     }
 
     func testParsesOutputEventsAcrossChunks() {

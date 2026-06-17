@@ -30,14 +30,14 @@ actor TmuxControlClient {
     static func connect(host: Host, sessionName: String) async throws -> TmuxControlClient {
         let connection = try await SSHConnectionManager.connectClient(for: host)
         let client = TmuxControlClient(connection: connection)
-        try await client.start(sessionName: sessionName, socketName: host.tmuxSocketName)
+        try await client.start(sessionName: sessionName, socketName: host.tmuxSocketName, tmuxCommand: host.tmuxCommand)
         return client
     }
 
-    func start(sessionName: String, socketName: String?) async throws {
+    func start(sessionName: String, socketName: String?, tmuxCommand: String?) async throws {
         guard lifecycleTask == nil else { return }
 
-        let command = TmuxLaunchCommand.controlMode(sessionName: sessionName, socketName: socketName)
+        let command = TmuxLaunchCommand.controlMode(sessionName: sessionName, socketName: socketName, tmuxCommand: tmuxCommand)
         try await withCheckedThrowingContinuation { continuation in
             startContinuation = continuation
             lifecycleTask = Task { [sshClient] in

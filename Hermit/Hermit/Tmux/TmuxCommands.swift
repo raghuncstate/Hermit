@@ -7,22 +7,29 @@ enum TmuxCommandQuoter {
 }
 
 enum TmuxLaunchCommand {
-    static func controlMode(sessionName: String, socketName: String?) -> String {
-        "\(tmuxCommand(socketName: socketName)) -CC new-session -A -s \(TmuxCommandQuoter.quote(sessionName))"
+    static func controlMode(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {
+        "\(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) -CC new-session -A -s \(TmuxCommandQuoter.quote(sessionName))"
     }
 
-    static func interactive(sessionName: String, socketName: String?) -> String {
-        "\(tmuxCommand(socketName: socketName)) new-session -As \(TmuxCommandQuoter.quote(sessionName))"
+    static func interactive(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {
+        "\(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) new-session -As \(TmuxCommandQuoter.quote(sessionName))"
     }
 
-    private static func tmuxCommand(socketName: String?) -> String {
+    private static func tmuxInvocation(socketName: String?, tmuxCommand: String?) -> String {
+        let executable = normalizedTmuxCommand(tmuxCommand).map(TmuxCommandQuoter.quote) ?? "tmux"
         guard let socketName = normalizedSocketName(socketName) else {
-            return "tmux"
+            return executable
         }
-        return "tmux -L \(TmuxCommandQuoter.quote(socketName))"
+        return "\(executable) -L \(TmuxCommandQuoter.quote(socketName))"
     }
 
     private static func normalizedSocketName(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizedTmuxCommand(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

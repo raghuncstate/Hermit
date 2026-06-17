@@ -15,7 +15,8 @@ struct ModelTests {
                 hostname: "raghudt",
                 username: "raghupathyk",
                 privateKeyRef: "jump-key-ref"
-            )
+            ),
+            tmuxCommand: " /Users/dev/bin/tmux "
         )
         let data = try JSONEncoder.hermit.encode(host)
         let decoded = try JSONDecoder.hermit.decode(Host.self, from: data)
@@ -25,6 +26,7 @@ struct ModelTests {
         #expect(decoded.username == host.username)
         #expect(decoded.privateKeyRef == host.privateKeyRef)
         #expect(decoded.jumpHost == host.jumpHost)
+        #expect(decoded.tmuxCommand == "/Users/dev/bin/tmux")
     }
 
     @Test func hostRoundTripsTmuxSocketName() throws {
