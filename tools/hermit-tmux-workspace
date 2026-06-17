@@ -114,20 +114,22 @@ def parse_tmux_rows(output: str) -> list[dict[str, str]]:
     rows = []
     for line in output.splitlines():
         parts = line.split("\t")
-        if len(parts) != 8:
+        if len(parts) not in {8, 10}:
             continue
-        rows.append(
-            {
-                "session": parts[0],
-                "index": parts[1],
-                "name": parts[2],
-                "pane": parts[3],
-                "pane_pid": parts[4],
-                "cwd": parts[5],
-                "command": parts[6],
-                "title": parts[7],
-            }
-        )
+        row = {
+            "session": parts[0],
+            "index": parts[1],
+            "name": parts[2],
+            "pane": parts[3],
+            "pane_pid": parts[4],
+            "cwd": parts[5],
+            "command": parts[6],
+            "title": parts[7],
+        }
+        if len(parts) == 10:
+            row["managed"] = parts[8]
+            row["resume_id"] = parts[9]
+        rows.append(row)
     return rows
 
 
@@ -142,6 +144,8 @@ def list_windows(session: str) -> list[dict[str, str]]:
             "#{pane_current_path}",
             "#{pane_current_command}",
             "#{pane_title}",
+            "#{@hermit_tmux_managed}",
+            "#{@hermit_tmux_resume_id}",
         ]
     )
     proc = tmux(["list-windows", "-t", session, "-F", fmt], check=False)
@@ -155,6 +159,25 @@ def find_window(session: str, name: str) -> dict[str, str] | None:
         if row.get("name") == name:
             return row
     return None
+
+
+def duplicate_window_groups(session: str) -> list[list[dict[str, str]]]:
+    groups: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in list_windows(session):
+        managed = row.get("managed") == "1"
+        resume_id = row.get("resume_id", "")
+        if not managed and not resume_id:
+            continue
+        key = (row.get("name", ""), resume_id)
+        groups.setdefault(key, []).append(row)
+    return [rows for rows in groups.values() if len(rows) > 1]
+
+
+def describe_duplicate_group(rows: list[dict[str, str]]) -> str:
+    first = rows[0]
+    locations = ", ".join(f"{row.get('session')}:{row.get('index')}" for row in rows)
+    resume = first.get("resume_id") or "no resume id"
+    return f"{first.get('name')} ({resume}) at {locations}"
 
 
 def current_window() -> dict[str, str]:
@@ -480,6 +503,9 @@ def start_workspace(manifest: dict[str, Any], *, repair_idle: bool = True) -> li
         else:
             actions.append(f"left existing window {name}")
 
+    for rows in duplicate_window_groups(session):
+        actions.append(f"warning: duplicate managed windows: {describe_duplicate_group(rows)}")
+
     return actions
 
 
@@ -509,7 +535,16 @@ def command_status(args: argparse.Namespace) -> int:
         return 1
 
     print("tmux: present")
-    live = {row["name"]: row for row in list_windows(session)}
+    live_rows = list_windows(session)
+    duplicates = duplicate_window_groups(session)
+    if duplicates:
+        print("duplicates:")
+        for rows in duplicates:
+            print(f"  {describe_duplicate_group(rows)}")
+
+    live: dict[str, dict[str, str]] = {}
+    for row in live_rows:
+        live.setdefault(row["name"], row)
     for window in manifest.get("windows", []):
         name = str(window.get("name"))
         row = live.get(name)
