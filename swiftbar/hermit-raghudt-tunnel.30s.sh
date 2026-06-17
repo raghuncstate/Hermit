@@ -11,6 +11,15 @@ last_nonempty_line() {
   awk 'NF { line=$0 } END { if (line) print line }' "$file" 2>/dev/null | tr -d '\r'
 }
 
+file_mtime() {
+  local file="$1"
+  [[ -f "$file" ]] || {
+    echo 0
+    return 0
+  }
+  stat -f '%m' "$file" 2>/dev/null || echo 0
+}
+
 first_line() {
   sed -n '1p' 2>/dev/null
 }
@@ -33,6 +42,8 @@ STATUS_LINE="$(printf '%s\n' "$STATUS_OUTPUT" | first_line)"
 LAST_ACTION="$(file_first_line "$ACTION_STATE")"
 LAST_LOG="$(last_nonempty_line "$LOG_DIR/raghudt-tunnel.log")"
 LAST_ERROR="$(last_nonempty_line "$LOG_DIR/raghudt-tunnel.err.log")"
+LAST_LOG_MTIME="$(file_mtime "$LOG_DIR/raghudt-tunnel.log")"
+LAST_ERROR_MTIME="$(file_mtime "$LOG_DIR/raghudt-tunnel.err.log")"
 
 if "$CMD" quiet-status >/dev/null 2>&1; then
   echo "Hermit Tunnel: On | color=green bash='$CMD' param1=swiftbar-action param2=toggle terminal=false refresh=true"
@@ -64,8 +75,10 @@ if [[ -n "$LAST_LOG" ]]; then
 fi
 if [[ -n "$LAST_ERROR" && "$STATE_LABEL" == "Connected" ]]; then
   echo "Previous error: $LAST_ERROR | color=gray size=12"
-elif [[ -n "$LAST_ERROR" ]]; then
+elif [[ -n "$LAST_ERROR" && "$LAST_ERROR_MTIME" -ge "$LAST_LOG_MTIME" ]]; then
   echo "Last error: $LAST_ERROR | color=red size=12"
+elif [[ -n "$LAST_ERROR" ]]; then
+  echo "Previous error: $LAST_ERROR | color=gray size=12"
 fi
 echo "---"
 echo "$TOGGLE_LABEL | bash='$CMD' param1=swiftbar-action param2=toggle terminal=false refresh=true"

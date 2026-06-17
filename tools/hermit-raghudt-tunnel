@@ -4,6 +4,8 @@ set -euo pipefail
 LABEL="com.raghu.hermit-raghudt-tunnel"
 REMOTE_USER="${HERMIT_TUNNEL_REMOTE_USER:-raghupathyk}"
 REMOTE_HOST="${HERMIT_TUNNEL_REMOTE_HOST:-raghudt}"
+REMOTE_HOST_FALLBACKS="${HERMIT_TUNNEL_REMOTE_HOST_FALLBACKS:-${HERMIT_TUNNEL_REMOTE_HOST_FALLBACK:-10.110.49.244}}"
+ACTIVE_REMOTE_HOST="$REMOTE_HOST"
 REMOTE_PORT="${HERMIT_TUNNEL_REMOTE_PORT:-22}"
 REMOTE_LISTEN_HOST="${HERMIT_TUNNEL_REMOTE_LISTEN_HOST:-127.0.0.1}"
 REMOTE_LISTEN_PORT="${HERMIT_TUNNEL_REMOTE_LISTEN_PORT:-22221}"
@@ -64,14 +66,56 @@ loaded() {
 
 master_connected() {
   [[ -S "$CONTROL_SOCKET" ]] || return 1
-  /usr/bin/ssh \
-    -S "$CONTROL_SOCKET" \
-    -O check \
-    -o BatchMode=yes \
-    -o ConnectTimeout=3 \
-    -o ConnectionAttempts=1 \
-    -o LogLevel=ERROR \
-    "$REMOTE_USER@$REMOTE_HOST" >/dev/null 2>&1
+
+  local host
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if /usr/bin/ssh \
+      -S "$CONTROL_SOCKET" \
+      -O check \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      -o ConnectionAttempts=1 \
+      -o LogLevel=ERROR \
+      "$REMOTE_USER@$host" >/dev/null 2>&1; then
+      ACTIVE_REMOTE_HOST="$host"
+      return 0
+    fi
+  done < <(remote_host_candidates)
+
+  return 1
+}
+
+remote_host_candidates() {
+  local seen=" "
+  local host
+  for host in "$REMOTE_HOST" $REMOTE_HOST_FALLBACKS; do
+    [[ -n "$host" ]] || continue
+    case "$seen" in
+      *" $host "*) ;;
+      *)
+        printf '%s\n' "$host"
+        seen="$seen$host "
+        ;;
+    esac
+  done
+}
+
+remote_host_summary() {
+  remote_host_candidates | paste -sd ',' -
+}
+
+select_active_remote_host() {
+  local host
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    if /usr/bin/nc -G 5 -z "$host" "$REMOTE_PORT" >/dev/null 2>&1; then
+      ACTIVE_REMOTE_HOST="$host"
+      return 0
+    fi
+  done < <(remote_host_candidates)
+
+  return 1
 }
 
 plist_escape() {
@@ -103,6 +147,8 @@ write_generated_plist() {
   <dict>
     <key>HERMIT_TUNNEL_REMOTE_HOST</key>
     <string>$(plist_escape "$REMOTE_HOST")</string>
+    <key>HERMIT_TUNNEL_REMOTE_HOST_FALLBACKS</key>
+    <string>$(plist_escape "$REMOTE_HOST_FALLBACKS")</string>
     <key>HERMIT_TUNNEL_REMOTE_LISTEN_PORT</key>
     <string>$(plist_escape "$REMOTE_LISTEN_PORT")</string>
     <key>HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE</key>
@@ -179,7 +225,7 @@ status() {
     printf 'connected: %s:%s -> %s:%s via %s@%s\n' \
       "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" \
       "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" \
-      "$REMOTE_USER" "$REMOTE_HOST"
+      "$REMOTE_USER" "$ACTIVE_REMOTE_HOST"
     return 0
   fi
 
@@ -196,19 +242,27 @@ status() {
 print_recent_log_summary() {
   local last_log=""
   local last_error=""
+  local log_mtime=0
+  local err_mtime=0
 
   if [[ -f "$LOG_DIR/raghudt-tunnel.log" ]]; then
     last_log="$(tail -n 1 "$LOG_DIR/raghudt-tunnel.log" 2>/dev/null || true)"
+    log_mtime="$(stat -f '%m' "$LOG_DIR/raghudt-tunnel.log" 2>/dev/null || printf '0')"
   fi
   if [[ -f "$LOG_DIR/raghudt-tunnel.err.log" ]]; then
     last_error="$(tail -n 1 "$LOG_DIR/raghudt-tunnel.err.log" 2>/dev/null || true)"
+    err_mtime="$(stat -f '%m' "$LOG_DIR/raghudt-tunnel.err.log" 2>/dev/null || printf '0')"
   fi
 
   if [[ -n "$last_log" ]]; then
     printf 'last log: %s\n' "$last_log"
   fi
   if [[ -n "$last_error" ]]; then
-    printf 'last error: %s\n' "$last_error"
+    if (( err_mtime >= log_mtime )); then
+      printf 'last error: %s\n' "$last_error"
+    else
+      printf 'previous error: %s\n' "$last_error"
+    fi
   fi
 }
 
@@ -225,7 +279,7 @@ remote_cleanup_ssh() {
     args+=(-i "$REMOTE_CLEANUP_IDENTITY_FILE" -o IdentitiesOnly=yes)
   fi
 
-  /usr/bin/ssh "${args[@]}" "$REMOTE_USER@$REMOTE_HOST" "$@"
+  /usr/bin/ssh "${args[@]}" "$REMOTE_USER@$ACTIVE_REMOTE_HOST" "$@"
 }
 
 remote_listener_occupied() {
@@ -249,8 +303,8 @@ clear_remote_port() {
     return 75
   fi
 
-  if ! /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
-    printf 'raghudt is not reachable at %s:%s; cannot clear remote port\n' "$REMOTE_HOST" "$REMOTE_PORT"
+  if ! select_active_remote_host; then
+    printf 'raghudt is not reachable at any configured host (%s):%s; cannot clear remote port\n' "$(remote_host_summary)" "$REMOTE_PORT"
     return 75
   fi
 
@@ -487,6 +541,15 @@ diagnose() {
   else
     printf '  remote SSH: NOT reachable (%s:%s)\n' "$REMOTE_HOST" "$REMOTE_PORT"
   fi
+  local fallback_host
+  while IFS= read -r fallback_host; do
+    [[ "$fallback_host" == "$REMOTE_HOST" ]] && continue
+    if /usr/bin/nc -G 5 -z "$fallback_host" "$REMOTE_PORT" >/dev/null 2>&1; then
+      printf '  remote SSH fallback: reachable (%s:%s)\n' "$fallback_host" "$REMOTE_PORT"
+    else
+      printf '  remote SSH fallback: NOT reachable (%s:%s)\n' "$fallback_host" "$REMOTE_PORT"
+    fi
+  done < <(remote_host_candidates)
   if /usr/bin/nc -G 2 -z "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT" >/dev/null 2>&1; then
     printf '  local SSH: reachable (%s:%s)\n' "$LOCAL_TARGET_HOST" "$LOCAL_TARGET_PORT"
   else
@@ -525,8 +588,8 @@ run_once() {
 
   rm -f "$CONTROL_SOCKET"
 
-  if ! /usr/bin/nc -G 5 -z "$REMOTE_HOST" "$REMOTE_PORT" >/dev/null 2>&1; then
-    log "raghudt is not reachable at $REMOTE_HOST:$REMOTE_PORT; will retry later"
+  if ! select_active_remote_host; then
+    log "raghudt is not reachable at any configured host ($(remote_host_summary)):$REMOTE_PORT; will retry later"
     exit 75
   fi
 
@@ -540,7 +603,7 @@ run_once() {
     exit 75
   fi
 
-  log "starting reverse tunnel: $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT -> $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT via $REMOTE_USER@$REMOTE_HOST"
+  log "starting reverse tunnel: $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT -> $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT via $REMOTE_USER@$ACTIVE_REMOTE_HOST"
 
   local ssh_error_file="$APP_DIR/raghudt-tunnel.ssh.err"
   rm -f "$ssh_error_file"
@@ -562,7 +625,7 @@ run_once() {
     -o LogLevel=ERROR \
     -R "$REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT:$LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT" \
     -p "$REMOTE_PORT" \
-    "$REMOTE_USER@$REMOTE_HOST" 2>"$ssh_error_file"
+    "$REMOTE_USER@$ACTIVE_REMOTE_HOST" 2>"$ssh_error_file"
   local ssh_code=$?
   set -e
 
@@ -591,7 +654,7 @@ run_once() {
     done <<< "$output"
     if [[ "$cleanup_code" -eq 0 ]]; then
       rm -f "$CONTROL_SOCKET"
-      log "retrying reverse tunnel after cleanup: $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT -> $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT via $REMOTE_USER@$REMOTE_HOST"
+      log "retrying reverse tunnel after cleanup: $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT -> $LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT via $REMOTE_USER@$ACTIVE_REMOTE_HOST"
       exec /usr/bin/ssh \
         -M \
         -S "$CONTROL_SOCKET" \
@@ -608,7 +671,7 @@ run_once() {
         -o LogLevel=ERROR \
         -R "$REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT:$LOCAL_TARGET_HOST:$LOCAL_TARGET_PORT" \
         -p "$REMOTE_PORT" \
-        "$REMOTE_USER@$REMOTE_HOST"
+        "$REMOTE_USER@$ACTIVE_REMOTE_HOST"
     fi
     log "remote listener cleanup after bind failure did not clear $REMOTE_LISTEN_HOST:$REMOTE_LISTEN_PORT; will retry later"
     exit 75

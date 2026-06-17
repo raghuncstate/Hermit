@@ -8,9 +8,23 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/raghu/bin/hermit-raghudt-tunnel</string>
+    <string>/Users/raghupathyk/bin/hermit-raghudt-tunnel</string>
     <string>run-once</string>
   </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMIT_TUNNEL_REMOTE_HOST</key>
+    <string>raghudt</string>
+    <key>HERMIT_TUNNEL_REMOTE_HOST_FALLBACKS</key>
+    <string>10.110.49.244</string>
+    <key>HERMIT_TUNNEL_REMOTE_LISTEN_PORT</key>
+    <string>22221</string>
+    <key>HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE</key>
+    <string>/Users/raghupathyk/.ssh/hermit_raghudt_reverse_ed25519</string>
+    <key>PATH</key>
+    <string>/Users/raghupathyk/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 
   <key>RunAtLoad</key>
   <true/>
@@ -27,9 +41,9 @@
   <integer>300</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/raghu/Library/Logs/Hermit/raghudt-tunnel.log</string>
+  <string>/Users/raghupathyk/Library/Logs/Hermit/raghudt-tunnel.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/raghu/Library/Logs/Hermit/raghudt-tunnel.err.log</string>
+  <string>/Users/raghupathyk/Library/Logs/Hermit/raghudt-tunnel.err.log</string>
 </dict>
 </plist>
