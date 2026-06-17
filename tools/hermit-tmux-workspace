@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import pathlib
@@ -32,18 +33,7 @@ TMUX_BIN = os.environ.get("HERMIT_TMUX_BIN") or next(
     ),
     shutil.which("tmux") or "tmux",
 )
-AGENT_BIN_CANDIDATES = {
-    "claude": (
-        pathlib.Path.home() / ".local" / "bin" / "claude",
-        pathlib.Path("/opt/homebrew/bin/claude"),
-        pathlib.Path("/usr/local/bin/claude"),
-    ),
-    "codex": (
-        pathlib.Path.home() / ".local" / "bin" / "codex",
-        pathlib.Path("/opt/homebrew/bin/codex"),
-        pathlib.Path("/usr/local/bin/codex"),
-    ),
-}
+RESTORE_COMMANDS_NEED_PATH = {"claude", "codex"}
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -79,14 +69,33 @@ def window_exists(session: str, name: str) -> bool:
     return any(row.get("name") == name for row in list_windows(session))
 
 
-def agent_binary(name: str) -> str:
-    env_name = f"HERMIT_{name.upper()}_BIN"
-    if os.environ.get(env_name):
-        return os.environ[env_name]
-    for candidate in AGENT_BIN_CANDIDATES.get(name, ()):
+def restore_path() -> str:
+    if os.environ.get("HERMIT_RESTORE_PATH"):
+        return os.environ["HERMIT_RESTORE_PATH"]
+
+    home = pathlib.Path.home()
+    candidates = [
+        home / ".local" / "bin",
+        home / ".local" / "node" / "bin",
+        *[pathlib.Path(p) for p in sorted(glob.glob(str(home / ".local" / "node-*" / "bin")), reverse=True)],
+        *[pathlib.Path(p) for p in sorted(glob.glob(str(home / ".local" / "share" / "node-*" / "bin")), reverse=True)],
+        pathlib.Path("/opt/homebrew/bin"),
+        pathlib.Path("/usr/local/bin"),
+        pathlib.Path("/usr/bin"),
+        pathlib.Path("/bin"),
+        pathlib.Path("/usr/sbin"),
+        pathlib.Path("/sbin"),
+    ]
+    seen: set[str] = set()
+    entries: list[str] = []
+    for candidate in candidates:
+        entry = str(candidate)
+        if entry in seen:
+            continue
         if candidate.exists():
-            return str(candidate)
-    return shutil.which(name) or name
+            entries.append(entry)
+            seen.add(entry)
+    return os.pathsep.join(entries)
 
 
 def normalize_command(command: list[str]) -> list[str]:
@@ -94,8 +103,8 @@ def normalize_command(command: list[str]) -> list[str]:
         return []
     normalized = [str(item) for item in command]
     binary = normalized[0]
-    if "/" not in binary and binary in AGENT_BIN_CANDIDATES:
-        normalized[0] = agent_binary(binary)
+    if "/" not in binary and binary in RESTORE_COMMANDS_NEED_PATH:
+        return ["/usr/bin/env", f"PATH={restore_path()}", *normalized]
     return normalized
 
 
