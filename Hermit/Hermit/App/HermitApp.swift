@@ -39,6 +39,11 @@ struct HermitApp: App {
                 } content: {
                     AboutView()
                 }
+                #if DEBUG && targetEnvironment(simulator)
+                .task {
+                    await SimulatorSelfTestRunner.runIfRequested(dataStore: dataStore)
+                }
+                #endif
         }
     }
 }

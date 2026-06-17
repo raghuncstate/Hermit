@@ -23,6 +23,7 @@ TMUX_BIN = os.environ.get("HERMIT_TMUX_BIN") or next(
     (
         str(candidate)
         for candidate in (
+            pathlib.Path.home() / ".local" / "bin" / "tmux",
             pathlib.Path("/opt/homebrew/bin/tmux"),
             pathlib.Path("/usr/local/bin/tmux"),
             pathlib.Path("/usr/bin/tmux"),
@@ -56,6 +57,12 @@ def session_exists(session: str) -> bool:
     return tmux(["has-session", "-t", session], check=False).returncode == 0
 
 
+def session_target(session: str) -> str:
+    proc = tmux(["display-message", "-p", "-t", session, "#{session_id}"], check=False)
+    target = proc.stdout.strip()
+    return target or session
+
+
 def window_exists(session: str, name: str) -> bool:
     return any(row.get("name") == name for row in list_windows(session))
 
@@ -74,10 +81,27 @@ def load_manifest(path: pathlib.Path) -> dict[str, Any]:
     data.setdefault("version", 1)
     data.setdefault("session", DEFAULT_SESSION)
     data.setdefault("windows", [])
+    validate_manifest(data, path)
     return data
 
 
+def validate_manifest(data: dict[str, Any], path: pathlib.Path) -> None:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for window in data.get("windows", []):
+        if not isinstance(window, dict):
+            raise HermitTmuxError(f"manifest windows must be JSON objects: {path}")
+        name = str(window.get("name") or "shell")
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        joined = ", ".join(sorted(duplicates))
+        raise HermitTmuxError(f"manifest has duplicate window names in {path}: {joined}")
+
+
 def save_manifest(path: pathlib.Path, data: dict[str, Any]) -> None:
+    validate_manifest(data, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w") as f:
@@ -124,6 +148,13 @@ def list_windows(session: str) -> list[dict[str, str]]:
     if proc.returncode != 0:
         return []
     return parse_tmux_rows(proc.stdout)
+
+
+def find_window(session: str, name: str) -> dict[str, str] | None:
+    for row in list_windows(session):
+        if row.get("name") == name:
+            return row
+    return None
 
 
 def current_window() -> dict[str, str]:
@@ -357,34 +388,59 @@ def create_session(session: str, first: dict[str, Any] | None) -> None:
         cwd = first.get("cwd") or str(pathlib.Path.home())
         name = first.get("name") or "shell"
         tmux(["new-session", "-d", "-s", session, "-n", name, "-c", cwd])
-        mark_window(session, name, first)
-        send_restore_command(session, name, first)
+        row = find_window(session, name)
+        target = row["pane"] if row else f"{session}:0"
+        mark_window_target(target, first)
+        send_restore_command_target(target, first)
     else:
         tmux(["new-session", "-d", "-s", session, "-n", "shell"])
 
 
 def mark_window(session: str, name: str, window: dict[str, Any]) -> None:
-    target = f"{session}:{name}"
+    row = find_window(session, name)
+    target = row["pane"] if row else f"{session}:{name}"
+    mark_window_target(target, window)
+
+
+def mark_window_target(target: str, window: dict[str, Any]) -> None:
     tmux(["set-option", "-w", "-t", target, "@hermit_tmux_managed", "1"], check=False)
     tmux(["set-option", "-w", "-t", target, "@hermit_tmux_agent", str(window.get("agent", ""))], check=False)
     tmux(["set-option", "-w", "-t", target, "@hermit_tmux_resume_id", str(window.get("resume_id", ""))], check=False)
 
 
 def is_window_managed(session: str, name: str) -> bool:
-    proc = tmux(["show-option", "-wqv", "-t", f"{session}:{name}", "@hermit_tmux_managed"], check=False)
+    row = find_window(session, name)
+    target = row["pane"] if row else f"{session}:{name}"
+    return is_window_managed_target(target)
+
+
+def is_window_managed_target(target: str) -> bool:
+    proc = tmux(["show-option", "-wqv", "-t", target, "@hermit_tmux_managed"], check=False)
     return proc.returncode == 0 and proc.stdout.strip() == "1"
 
 
 def active_command(session: str, name: str) -> str:
-    proc = tmux(["display-message", "-p", "-t", f"{session}:{name}", "#{pane_current_command}"], check=False)
+    row = find_window(session, name)
+    target = row["pane"] if row else f"{session}:{name}"
+    return active_command_target(target)
+
+
+def active_command_target(target: str) -> str:
+    proc = tmux(["display-message", "-p", "-t", target, "#{pane_current_command}"], check=False)
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def send_restore_command(session: str, name: str, window: dict[str, Any]) -> None:
+    row = find_window(session, name)
+    target = row["pane"] if row else f"{session}:{name}"
+    send_restore_command_target(target, window)
+
+
+def send_restore_command_target(target: str, window: dict[str, Any]) -> None:
     command = window.get("command")
     if not isinstance(command, list) or not command:
         return
-    tmux(["send-keys", "-t", f"{session}:{name}", shell_join([str(x) for x in command]), "C-m"])
+    tmux(["send-keys", "-t", target, shell_join([str(x) for x in command]), "C-m"])
 
 
 def start_workspace(manifest: dict[str, Any], *, repair_idle: bool = True) -> list[str]:
@@ -404,17 +460,20 @@ def start_workspace(manifest: dict[str, Any], *, repair_idle: bool = True) -> li
     for window in windows:
         name = str(window.get("name") or "shell")
         cwd = str(window.get("cwd") or pathlib.Path.home())
-        if not window_exists(session, name):
-            tmux(["new-window", "-d", "-t", session, "-n", name, "-c", cwd])
-            mark_window(session, name, window)
-            send_restore_command(session, name, window)
+        row = find_window(session, name)
+        if not row:
+            proc = tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", session_target(session), "-n", name, "-c", cwd])
+            target = proc.stdout.strip()
+            mark_window_target(target, window)
+            send_restore_command_target(target, window)
             actions.append(f"created window {name}")
             continue
 
-        if is_window_managed(session, name) and repair_idle:
-            cmd = active_command(session, name)
+        target = row["pane"]
+        if is_window_managed_target(target) and repair_idle:
+            cmd = active_command_target(target)
             if cmd in {"bash", "zsh", "sh", "fish", "login"}:
-                send_restore_command(session, name, window)
+                send_restore_command_target(target, window)
                 actions.append(f"restarted idle managed window {name}")
             else:
                 actions.append(f"left running managed window {name} ({cmd})")

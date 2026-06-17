@@ -27,6 +27,19 @@ struct TmuxPane: Codable, Hashable, Identifiable {
     var width: Int
     var height: Int
     var currentCommand: String
+
+    func prefersTerminalPager(windowName: String) -> Bool {
+        let lowercasedText = "\(windowName) \(title) \(currentCommand)".lowercased()
+        if lowercasedText.contains("claude") {
+            return true
+        }
+
+        let commandLooksLikeClaudeCodeVersion = currentCommand.range(
+            of: #"^\d+\.\d+\.\d+$"#,
+            options: .regularExpression
+        ) != nil
+        return commandLooksLikeClaudeCodeVersion && title.hasPrefix("✳")
+    }
 }
 
 enum TmuxConnectionStatus: Equatable {

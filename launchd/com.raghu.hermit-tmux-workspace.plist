@@ -12,6 +12,7 @@
     <string>start</string>
     <string>--manifest</string>
     <string>__MANIFEST__</string>
+    <string>--no-repair-idle</string>
   </array>
 
   <key>RunAtLoad</key>

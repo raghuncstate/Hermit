@@ -41,6 +41,7 @@ final class DataStore {
         migrateLocalToiCloudIfNeeded()
         load()
         createFileIfNeeded()
+        seedSimulatorProfileIfRequested()
         startWatchingForChanges()
     }
 
@@ -594,6 +595,47 @@ final class DataStore {
             hosts = migrateHedgehogProfile(hosts: hosts).hosts
             save()
         }
+    }
+
+    private func seedSimulatorProfileIfRequested() {
+        #if DEBUG && targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["HERMIT_SIM_SEED_PROFILE"] == "1" else { return }
+
+        let keyRef = environment["HERMIT_SIM_KEY_REF"] ?? "hermit-simulator-test-key"
+        var seededKeyData: Data?
+        if let keyBase64 = environment["HERMIT_SIM_KEY_BASE64"],
+           let keyData = Data(base64Encoded: keyBase64) {
+            seededKeyData = keyData
+            try? KeychainManager.save(key: keyRef, data: keyData)
+        } else if let keyPath = environment["HERMIT_SIM_KEY_PATH"],
+           let keyData = try? Data(contentsOf: URL(fileURLWithPath: keyPath)) {
+            seededKeyData = keyData
+            try? KeychainManager.save(key: keyRef, data: keyData)
+        }
+        if let seededKeyData,
+           let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            try? seededKeyData.write(to: documents.appendingPathComponent("dev-ssh-key"), options: .atomic)
+        }
+
+        let hostID = UUID(uuidString: environment["HERMIT_SIM_HOST_ID"] ?? "D0DD8F51-DCC8-4F86-96FC-5CB4D7301D0D")!
+        let seededHost = Host(
+            id: hostID,
+            displayName: environment["HERMIT_SIM_HOST_NAME"] ?? "Simulator Local Mac",
+            hostname: environment["HERMIT_SIM_HOST"] ?? "127.0.0.1",
+            port: Int(environment["HERMIT_SIM_PORT"] ?? "22") ?? 22,
+            username: environment["HERMIT_SIM_USER"] ?? NSUserName(),
+            privateKeyRef: keyRef,
+            defaultTmuxSessionName: environment["HERMIT_SIM_TMUX_SESSION"] ?? "0"
+        )
+
+        if let index = hosts.firstIndex(where: { $0.id == hostID }) {
+            hosts[index] = seededHost
+        } else {
+            hosts.append(seededHost)
+        }
+        save()
+        #endif
     }
 
     // MARK: - iCloud Sync

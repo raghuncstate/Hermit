@@ -62,4 +62,63 @@ struct ModelTests {
         let decoded = try JSONDecoder.hermit.decode(Session.self, from: data)
         #expect(decoded.tmuxSessionName == nil)
     }
+
+    @Test func terminalPagerMacrosSendPageKeysWithoutForcingBottomFollow() {
+        let pageUp = TmuxMacro.defaults.first { $0.label == "PgUp" }
+        let pageDown = TmuxMacro.defaults.first { $0.label == "PgDn" }
+
+        #expect(pageUp?.key == "PageUp")
+        #expect(pageUp?.preservesViewport == true)
+        #expect(pageDown?.key == "PageDown")
+        #expect(pageDown?.preservesViewport == true)
+    }
+
+    @Test func defaultMacrosPreferCtrlUAndDoNotIncludeRemovedControls() {
+        let labels = Set(TmuxMacro.defaults.map(\.label))
+
+        #expect(labels.contains("Ctrl-U"))
+        #expect(!labels.contains("Ctrl-C"))
+        #expect(!labels.contains("q"))
+        #expect(!labels.contains("/clear"))
+        #expect(TmuxMacro.defaults.first { $0.label == "Ctrl-U" }?.key == "C-u")
+    }
+
+    @Test func claudePanesPreferTerminalPager() {
+        let titledClaudePane = TmuxPane(
+            id: "%1",
+            index: 0,
+            title: "✳ Claude Code",
+            isActive: true,
+            width: 80,
+            height: 24,
+            currentCommand: "2.1.170"
+        )
+        let namedClaudePane = TmuxPane(
+            id: "%2",
+            index: 0,
+            title: "project",
+            isActive: true,
+            width: 80,
+            height: 24,
+            currentCommand: "node"
+        )
+
+        #expect(titledClaudePane.prefersTerminalPager(windowName: "irsfine"))
+        #expect(namedClaudePane.prefersTerminalPager(windowName: "google-drtm-claude"))
+    }
+
+    @Test func codexPanesKeepAppSidePanePaging() {
+        let codexPane = TmuxPane(
+            id: "%3",
+            index: 0,
+            title: "tmp",
+            isActive: true,
+            width: 80,
+            height: 24,
+            currentCommand: "node"
+        )
+
+        #expect(!codexPane.prefersTerminalPager(windowName: "hermit iphone"))
+        #expect(!codexPane.prefersTerminalPager(windowName: "google-drtm-codex"))
+    }
 }

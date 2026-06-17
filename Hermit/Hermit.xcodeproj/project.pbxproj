@@ -19,6 +19,7 @@
 		56E185D7340403E3A2698C5B /* NewHostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C37793D32B81DDE173E82EAD /* NewHostView.swift */; };
 		698EC92E23FFC9F980449B63 /* DataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B93D8483C507AE268486180F /* DataStoreTests.swift */; };
 		6B878949F84012546095F751 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2435F9E8A183D6150175307 /* SessionListView.swift */; };
+		70D0F61B4D9340F4B1918E71 /* SimulatorSelfTestRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88AA7B114F1E4C1D94FA02CE /* SimulatorSelfTestRunner.swift */; };
 		8289A071E829C23F907E366D /* KeychainManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 671A41A0D0B1223FFFAE7AE1 /* KeychainManager.swift */; };
 		9338B8421E2ADFC2C45471BD /* ModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 281571BEA9FA0A063ED80B4A /* ModelTests.swift */; };
 		9427E70309498CDBF08B3846 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD59E0EB71DC1D5B631D2753 /* SettingsView.swift */; };
@@ -70,6 +71,7 @@
 		506D3F22B8E512F8477704DD /* Session.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Session.swift; sourceTree = "<group>"; };
 		5431404A90840D58CD203A9D /* RibbonConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RibbonConfig.swift; sourceTree = "<group>"; };
 		671A41A0D0B1223FFFAE7AE1 /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
+		88AA7B114F1E4C1D94FA02CE /* SimulatorSelfTestRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorSelfTestRunner.swift; sourceTree = "<group>"; };
 		8D4E3F8BA81DD11469FAE479 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RibbonConfigTests.swift; sourceTree = "<group>"; };
 		9DEAE89058FED6E1760B2389 /* VoiceInputModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputModal.swift; sourceTree = "<group>"; };
@@ -259,6 +261,7 @@
 			isa = PBXGroup;
 			children = (
 				3E1D418BB2D9FB67AE86DC7D /* HermitApp.swift */,
+				88AA7B114F1E4C1D94FA02CE /* SimulatorSelfTestRunner.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -365,6 +368,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				549209BD9A061593509D3A28 /* HermitApp.swift in Sources */,
+				70D0F61B4D9340F4B1918E71 /* SimulatorSelfTestRunner.swift in Sources */,
 				0BA5599BA8F6C23C17709334 /* Host.swift in Sources */,
 				9AD97B0DCE2650C15E7436BE /* Session.swift in Sources */,
 				4409E77D383293F34BAB53EF /* RibbonConfig.swift in Sources */,
@@ -485,14 +489,14 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Hermit/Hermit.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Hermit/HermitDev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XY6CJ6B92K;
 				INFOPLIST_FILE = Hermit/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = " @executable_path/Frameworks";
 				MARKETING_VERSION = 1.3;
-				PRODUCT_BUNDLE_IDENTIFIER = com.zeromissionllc.hermit;
+				PRODUCT_BUNDLE_IDENTIFIER = com.raghupathy.hermit.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 1;

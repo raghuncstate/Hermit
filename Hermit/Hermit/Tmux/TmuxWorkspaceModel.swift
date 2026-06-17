@@ -20,6 +20,7 @@ struct TmuxMacro: Identifiable, Hashable {
     var key: String
     var sendsLiteralText: Bool = false
     var appendsEnter: Bool = false
+    var preservesViewport: Bool = false
 
     static let defaults: [TmuxMacro] = [
         TmuxMacro(label: "Esc", systemImage: nil, key: "Escape"),
@@ -27,13 +28,13 @@ struct TmuxMacro: Identifiable, Hashable {
         TmuxMacro(label: "Enter", systemImage: "return", key: "Enter"),
         TmuxMacro(label: "Up", systemImage: "arrow.up", key: "Up"),
         TmuxMacro(label: "Down", systemImage: "arrow.down", key: "Down"),
+        TmuxMacro(label: "PgUp", systemImage: "chevron.up.2", key: "PageUp", preservesViewport: true),
+        TmuxMacro(label: "PgDn", systemImage: "chevron.down.2", key: "PageDown", preservesViewport: true),
         TmuxMacro(label: "Left", systemImage: "arrow.left", key: "Left"),
         TmuxMacro(label: "Right", systemImage: "arrow.right", key: "Right"),
-        TmuxMacro(label: "Ctrl-C", systemImage: nil, key: "C-c"),
+        TmuxMacro(label: "Ctrl-U", systemImage: nil, key: "C-u"),
         TmuxMacro(label: "Ctrl-D", systemImage: nil, key: "C-d"),
         TmuxMacro(label: "Ctrl-Z", systemImage: nil, key: "C-z"),
-        TmuxMacro(label: "q", systemImage: nil, key: "q", sendsLiteralText: true),
-        TmuxMacro(label: "/clear", systemImage: nil, key: "/clear", sendsLiteralText: true, appendsEnter: true),
     ]
 }
 

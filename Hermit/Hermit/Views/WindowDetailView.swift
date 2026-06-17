@@ -3,9 +3,49 @@ import UIKit
 
 struct WindowDetailView: View {
     private enum PaneScrollAction: Equatable {
-        case top
+        case pageUp
+        case pageDown
         case bottom
         case bottomLeading
+    }
+
+    private enum TerminalPageDirection {
+        case up
+        case down
+
+        var macro: TmuxMacro {
+            switch self {
+            case .up:
+                TmuxMacro(label: "PgUp", systemImage: "chevron.up.2", key: "PageUp", preservesViewport: true)
+            case .down:
+                TmuxMacro(label: "PgDn", systemImage: "chevron.down.2", key: "PageDown", preservesViewport: true)
+            }
+        }
+    }
+
+    private enum TerminalInteractionMode: String {
+        case codex
+        case claude
+
+        var label: String {
+            switch self {
+            case .codex: "Codex"
+            case .claude: "Claude"
+            }
+        }
+
+        var accessibilityHint: String {
+            switch self {
+            case .codex:
+                "Up and down use Hermit tmux scrollback."
+            case .claude:
+                "Up, down, and swipe scrolling send Page Up and Page Down to the terminal."
+            }
+        }
+
+        var toggled: TerminalInteractionMode {
+            self == .claude ? .codex : .claude
+        }
     }
 
     private enum WindowSwitcherScope: String, CaseIterable, Identifiable {
@@ -43,8 +83,10 @@ struct WindowDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
     @Environment(DataStore.self) private var dataStore
+    @Environment(AppNavigator.self) private var navigator
     @State private var selectedPaneId: String?
     @State private var selectedWindowId: String?
+    @State private var selectedSessionId: String?
     @State private var commandText = ""
     @State private var streamedInputText = ""
     @State private var suppressInputChange = false
@@ -59,8 +101,8 @@ struct WindowDetailView: View {
     @State private var killRequest: KillRequest?
     @State private var scrollRequest = PaneScrollRequest(action: .bottom, token: 0)
     @State private var terminalViewportWidth: CGFloat = 0
-    @State private var scrollbackLoadedPaneIds: Set<String> = []
     @State private var activationRefreshTask: Task<Void, Never>?
+    @AppStorage("hermit.windowTerminalInteractionModes.v1") private var terminalInteractionModesJSON = "{}"
 
     private var allKnownWindows: [TmuxWindow] {
         let loadedWindows = model.sessions.flatMap { model.windows(for: $0) }
@@ -73,11 +115,20 @@ struct WindowDetailView: View {
 
     private var currentWindow: TmuxWindow {
         let targetWindowId = selectedWindowId ?? window.id
-        return allKnownWindows.first { $0.id == targetWindowId } ?? allKnownWindows.first { $0.id == window.id } ?? window
+        let targetSessionId = selectedSessionId ?? window.sessionId
+        return allKnownWindows.first { $0.id == targetWindowId && $0.sessionId == targetSessionId }
+            ?? allKnownWindows.first { $0.id == targetWindowId }
+            ?? allKnownWindows.first { $0.id == window.id && $0.sessionId == window.sessionId }
+            ?? allKnownWindows.first { $0.id == window.id }
+            ?? window
     }
 
     private var currentSession: TmuxSession {
-        model.sessions.first { $0.id == currentWindow.sessionId } ?? session
+        if let selectedSessionId,
+           let selectedSession = model.sessions.first(where: { $0.id == selectedSessionId }) {
+            return selectedSession
+        }
+        return model.sessions.first { $0.id == currentWindow.sessionId } ?? session
     }
 
     private var selectedPane: TmuxPane? {
@@ -93,6 +144,24 @@ struct WindowDetailView: View {
 
     private var shortcutSwitcherFavoriteLimit: Int {
         UIDevice.current.userInterfaceIdiom == .phone ? 3 : 6
+    }
+
+    private var terminalInteractionModeKey: String {
+        [
+            model.host.id.uuidString,
+            currentSession.name,
+            currentWindow.name,
+        ].joined(separator: "|")
+    }
+
+    private var currentTerminalInteractionMode: TerminalInteractionMode {
+        if let override = terminalInteractionModeOverrides()[terminalInteractionModeKey] {
+            return override
+        }
+        if selectedPane?.prefersTerminalPager(windowName: currentWindow.name) == true {
+            return .claude
+        }
+        return .codex
     }
 
     var body: some View {
@@ -143,22 +212,10 @@ struct WindowDetailView: View {
                 .accessibilityLabel("Fit to Screen")
 
                 terminalFontMenu
-
-                Toggle(isOn: $follow) {
-                    Image(systemName: follow ? "dot.radiowaves.left.and.right" : "pause.fill")
-                }
-                .toggleStyle(.button)
-                .accessibilityLabel("Follow Output")
-                .onChange(of: follow) { _, value in
-                    if value {
-                        requestPaneScroll(.bottom)
-                    } else if let pane = selectedPane {
-                        model.setFollow(pane.id, enabled: false)
-                    }
-                }
             }
         }
-        .task(id: currentWindow.id) {
+        .task(id: "\(currentSession.id)|\(currentWindow.id)") {
+            selectedSessionId = currentSession.id
             selectedWindowId = currentWindow.id
             await model.loadWindow(currentWindow)
             let loadedPanes = model.panes(for: currentWindow)
@@ -279,6 +336,9 @@ struct WindowDetailView: View {
 
     private var paneToolbar: some View {
         HStack(spacing: 8) {
+            let interactionMode = currentTerminalInteractionMode
+            let usesTerminalPager = interactionMode == .claude
+
             Text(currentSession.name)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -295,24 +355,49 @@ struct WindowDetailView: View {
 
             if selectedPane != nil {
                 Button {
-                    requestPaneScroll(.top)
+                    setTerminalInteractionMode(interactionMode.toggled)
                 } label: {
-                    Image(systemName: "arrow.up.to.line")
+                    Text(interactionMode.label)
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .frame(width: 54, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .tint(usesTerminalPager ? Color.blue : Color.secondary)
+                .accessibilityLabel("\(interactionMode.label) Mode")
+                .accessibilityHint(interactionMode.accessibilityHint)
+
+                Button {
+                    pageSelectedPane(.up)
+                } label: {
+                    Image(systemName: "chevron.up.2")
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
-                .accessibilityLabel("Go to Top")
+                .accessibilityLabel(usesTerminalPager ? "Page Up" : "Pane Up")
 
                 Button {
-                    requestPaneScroll(.bottom)
+                    pageSelectedPane(.down)
+                } label: {
+                    Image(systemName: "chevron.down.2")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle)
+                .accessibilityLabel(usesTerminalPager ? "Page Down" : "Pane Down")
+
+                Button {
+                    goToLiveOutput()
                 } label: {
                     Image(systemName: "arrow.down.to.line")
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle)
-                .accessibilityLabel("Go to Bottom")
+                .accessibilityLabel(usesTerminalPager ? "Send Control End" : "Go to Live Output")
             }
         }
         .frame(height: 38)
@@ -400,15 +485,21 @@ struct WindowDetailView: View {
                 contentWidth: contentWidth,
                 follow: follow,
                 scrollRequest: scrollRequest,
+                usesTerminalPagerScroll: currentTerminalInteractionMode == .claude,
                 onManualScrollAwayFromBottom: {
                     pauseFollowForManualPaneScroll(pane)
                 },
                 onManualScrollToBottom: {
                     resumeFollowForManualPaneScroll(pane)
                 },
+                onTerminalPagerScroll: { direction in
+                    Task { @MainActor in
+                        await pagePane(direction, pane: pane)
+                    }
+                },
                 onRefresh: { finish in
                     Task { @MainActor in
-                        await loadScrollbackFromTerminalPull(pane)
+                        await pagePane(.up, pane: pane)
                         finish()
                     }
                 }
@@ -529,7 +620,10 @@ struct WindowDetailView: View {
     @ViewBuilder
     private func shortcutSwitcherRow(_ shortcut: TmuxShortcut) -> some View {
         if dataStore.host(for: shortcut) != nil {
-            NavigationLink(value: AppRoute.shortcut(shortcut)) {
+            Button {
+                showingWindowSwitcher = false
+                navigator.open(shortcut)
+            } label: {
                 HStack(spacing: 10) {
                     Image(systemName: shortcut.systemImage)
                         .foregroundStyle(.secondary)
@@ -559,9 +653,6 @@ struct WindowDetailView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .simultaneousGesture(TapGesture().onEnded {
-                showingWindowSwitcher = false
-            })
         }
     }
 
@@ -879,12 +970,36 @@ struct WindowDetailView: View {
 
     private func sendMacro(_ macro: TmuxMacro) {
         guard let pane = selectedPane else { return }
-        requestPaneScroll(.bottom)
+        if macro.preservesViewport {
+            follow = false
+            model.setFollow(pane.id, enabled: false)
+        } else {
+            requestPaneScroll(.bottom)
+        }
         Task { await model.send(macro, to: pane) }
+    }
+
+    private func terminalInteractionModeOverrides() -> [String: TerminalInteractionMode] {
+        guard let data = terminalInteractionModesJSON.data(using: .utf8),
+              let rawValues = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return rawValues.compactMapValues(TerminalInteractionMode.init(rawValue:))
+    }
+
+    private func setTerminalInteractionMode(_ mode: TerminalInteractionMode) {
+        var overrides = terminalInteractionModeOverrides()
+        overrides[terminalInteractionModeKey] = mode
+        let rawValues = overrides.mapValues(\.rawValue)
+        if let data = try? JSONEncoder().encode(rawValues),
+           let json = String(data: data, encoding: .utf8) {
+            terminalInteractionModesJSON = json
+        }
     }
 
     private func switchToWindow(_ tmuxWindow: TmuxWindow, in tmuxSession: TmuxSession? = nil) {
         let targetSession = tmuxSession ?? session(for: tmuxWindow)
+        selectedSessionId = targetSession.id
         selectedWindowId = tmuxWindow.id
         selectedPaneId = nil
         follow = true
@@ -908,6 +1023,7 @@ struct WindowDetailView: View {
 
     private func switchToPane(_ pane: TmuxPane, in tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession? = nil) {
         let targetSession = tmuxSession ?? session(for: tmuxWindow)
+        selectedSessionId = targetSession.id
         selectedWindowId = tmuxWindow.id
         selectedPaneId = pane.id
         follow = true
@@ -935,7 +1051,9 @@ struct WindowDetailView: View {
                 await model.refreshWindows(for: targetSession)
             }
             if selectedWindowId == tmuxWindow.id || currentWindow.id == tmuxWindow.id {
-                selectedWindowId = model.windows(for: targetSession).first?.id ?? allKnownWindows.first?.id
+                let replacementWindow = model.windows(for: targetSession).first ?? allKnownWindows.first
+                selectedSessionId = replacementWindow?.sessionId
+                selectedWindowId = replacementWindow?.id
                 selectedPaneId = nil
             }
         }
@@ -1052,6 +1170,7 @@ struct WindowDetailView: View {
             ?? model.windows(for: restoredSession).first { $0.name == previousWindow.name }
             ?? previousWindow
 
+        selectedSessionId = restoredSession.id
         selectedWindowId = restoredWindow.id
         await model.loadWindow(restoredWindow)
 
@@ -1105,37 +1224,74 @@ struct WindowDetailView: View {
         }
     }
 
-    private func loadScrollbackFromTerminalPull(_ pane: TmuxPane) async {
-        follow = false
-        model.setFollow(pane.id, enabled: false)
-        await model.captureScrollback(pane)
-        scrollbackLoadedPaneIds.insert(pane.id)
-    }
-
     private func requestPaneScroll(_ action: PaneScrollAction) {
-        follow = action != .top
+        follow = action == .bottom || action == .bottomLeading
         if let pane = selectedPane {
             model.setFollow(pane.id, enabled: follow)
-            if action != .top {
-                scrollbackLoadedPaneIds.remove(pane.id)
-            }
         }
 
-        if action != .top {
-            scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
-            return
-        }
+        scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
+    }
 
+    private func goToLiveOutput() {
         guard let pane = selectedPane else {
-            scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
+            requestPaneScroll(.bottom)
             return
         }
 
-        Task { @MainActor in
-            await model.captureScrollback(pane)
-            scrollbackLoadedPaneIds.insert(pane.id)
-            scrollRequest = PaneScrollRequest(action: action, token: scrollRequest.token + 1)
+        guard currentTerminalInteractionMode == .claude else {
+            requestPaneScroll(.bottom)
+            return
         }
+
+        follow = true
+        model.setFollow(pane.id, enabled: true)
+        Task { @MainActor in
+            let controlEnd = TmuxMacro(label: "Ctrl-End", systemImage: nil, key: "C-End")
+            await model.send(controlEnd, to: pane)
+            await model.captureLive(pane)
+            requestPaneScroll(.bottom)
+        }
+    }
+
+    private func pageSelectedPane(_ direction: TerminalPageDirection) {
+        guard let pane = selectedPane else { return }
+        Task { @MainActor in
+            await pagePane(direction, pane: pane)
+        }
+    }
+
+    private func pagePane(_ direction: TerminalPageDirection, pane: TmuxPane) async {
+        if currentTerminalInteractionMode == .claude {
+            await sendTerminalPage(direction, to: pane)
+        } else {
+            await pageCapturedPane(direction, pane: pane)
+        }
+    }
+
+    private func pageCapturedPane(_ direction: TerminalPageDirection, pane: TmuxPane) async {
+        follow = false
+        model.setFollow(pane.id, enabled: false)
+        if direction == .up {
+            await model.captureScrollback(pane)
+        }
+        scrollRequest = PaneScrollRequest(
+            action: direction == .up ? .pageUp : .pageDown,
+            token: scrollRequest.token + 1
+        )
+    }
+
+    private func sendTerminalPage(_ direction: TerminalPageDirection) {
+        guard let pane = selectedPane else { return }
+        Task { @MainActor in
+            await sendTerminalPage(direction, to: pane)
+        }
+    }
+
+    private func sendTerminalPage(_ direction: TerminalPageDirection, to pane: TmuxPane) async {
+        follow = false
+        model.setFollow(pane.id, enabled: false)
+        await model.send(direction.macro, to: pane)
     }
 
     private func pauseFollowForManualPaneScroll(_ pane: TmuxPane) {
@@ -1216,14 +1372,18 @@ struct WindowDetailView: View {
         var contentWidth: CGFloat
         var follow: Bool
         var scrollRequest: PaneScrollRequest
+        var usesTerminalPagerScroll: Bool
         var onManualScrollAwayFromBottom: () -> Void
         var onManualScrollToBottom: () -> Void
+        var onTerminalPagerScroll: (TerminalPageDirection) -> Void
         var onRefresh: (@escaping () -> Void) -> Void
 
         func makeCoordinator() -> Coordinator {
             Coordinator(
+                usesTerminalPagerScroll: usesTerminalPagerScroll,
                 onManualScrollAwayFromBottom: onManualScrollAwayFromBottom,
                 onManualScrollToBottom: onManualScrollToBottom,
+                onTerminalPagerScroll: onTerminalPagerScroll,
                 onRefresh: onRefresh
             )
         }
@@ -1265,8 +1425,10 @@ struct WindowDetailView: View {
         }
 
         func updateUIView(_ textView: UITextView, context: Context) {
+            context.coordinator.usesTerminalPagerScroll = usesTerminalPagerScroll
             context.coordinator.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
             context.coordinator.onManualScrollToBottom = onManualScrollToBottom
+            context.coordinator.onTerminalPagerScroll = onTerminalPagerScroll
             context.coordinator.onRefresh = onRefresh
             context.coordinator.isProgrammaticScroll = true
             defer { context.coordinator.isProgrammaticScroll = false }
@@ -1318,8 +1480,10 @@ struct WindowDetailView: View {
             if context.coordinator.scrollToken != scrollRequest.token {
                 context.coordinator.scrollToken = scrollRequest.token
                 switch scrollRequest.action {
-                case .top:
-                    context.coordinator.scrollToTop(textView)
+                case .pageUp:
+                    context.coordinator.pageUp(textView)
+                case .pageDown:
+                    context.coordinator.pageDown(textView)
                 case .bottom:
                     context.coordinator.scrollToBottom(textView)
                 case .bottomLeading:
@@ -1372,8 +1536,10 @@ struct WindowDetailView: View {
         }
 
         final class Coordinator: NSObject, UITextViewDelegate {
+            var usesTerminalPagerScroll: Bool
             var onManualScrollAwayFromBottom: () -> Void
             var onManualScrollToBottom: () -> Void
+            var onTerminalPagerScroll: (TerminalPageDirection) -> Void
             var onRefresh: (@escaping () -> Void) -> Void
             var rawText = ""
             var displayText = ""
@@ -1384,14 +1550,19 @@ struct WindowDetailView: View {
             private var dragStartOffset: CGPoint?
             private var didHandleManualScrollAwayFromBottom = false
             private var didHandleManualScrollToBottom = false
+            private var didHandleTerminalPagerScroll = false
 
             init(
+                usesTerminalPagerScroll: Bool,
                 onManualScrollAwayFromBottom: @escaping () -> Void,
                 onManualScrollToBottom: @escaping () -> Void,
+                onTerminalPagerScroll: @escaping (TerminalPageDirection) -> Void,
                 onRefresh: @escaping (@escaping () -> Void) -> Void
             ) {
+                self.usesTerminalPagerScroll = usesTerminalPagerScroll
                 self.onManualScrollAwayFromBottom = onManualScrollAwayFromBottom
                 self.onManualScrollToBottom = onManualScrollToBottom
+                self.onTerminalPagerScroll = onTerminalPagerScroll
                 self.onRefresh = onRefresh
             }
 
@@ -1408,6 +1579,7 @@ struct WindowDetailView: View {
                 dragStartOffset = scrollView.contentOffset
                 didHandleManualScrollAwayFromBottom = false
                 didHandleManualScrollToBottom = false
+                didHandleTerminalPagerScroll = false
             }
 
             func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -1426,6 +1598,16 @@ struct WindowDetailView: View {
                 guard verticalDelta > 8, verticalDelta >= deltaX else { return }
 
                 let movedTowardHistory = deltaY < -8
+                if usesTerminalPagerScroll {
+                    guard verticalDelta > 28, !didHandleTerminalPagerScroll else { return }
+                    didHandleTerminalPagerScroll = true
+                    onTerminalPagerScroll(movedTowardHistory ? .up : .down)
+                    isProgrammaticScroll = true
+                    restore(offset: dragStartOffset, in: scrollView)
+                    isProgrammaticScroll = false
+                    return
+                }
+
                 if movedTowardHistory {
                     guard !didHandleManualScrollAwayFromBottom else { return }
                     didHandleManualScrollAwayFromBottom = true
@@ -1445,6 +1627,7 @@ struct WindowDetailView: View {
                     dragStartOffset = nil
                     didHandleManualScrollAwayFromBottom = false
                     didHandleManualScrollToBottom = false
+                    didHandleTerminalPagerScroll = false
                 }
             }
 
@@ -1452,6 +1635,7 @@ struct WindowDetailView: View {
                 dragStartOffset = nil
                 didHandleManualScrollAwayFromBottom = false
                 didHandleManualScrollToBottom = false
+                didHandleTerminalPagerScroll = false
             }
 
             func textViewDidChangeSelection(_ textView: UITextView) {
@@ -1489,12 +1673,6 @@ struct WindowDetailView: View {
                 isNearBottom(textView, tolerance: 8)
             }
 
-            func scrollToTop(_ textView: UITextView) {
-                let minY = -textView.adjustedContentInset.top
-                let minX = -textView.adjustedContentInset.left
-                restore(offset: CGPoint(x: minX, y: minY), in: textView)
-            }
-
             func scrollToBottom(_ textView: UITextView) {
                 let maxY = bottomOffset(for: textView)
                 restore(offset: CGPoint(x: textView.contentOffset.x, y: maxY), in: textView)
@@ -1504,6 +1682,14 @@ struct WindowDetailView: View {
                 let minX = -textView.adjustedContentInset.left
                 let maxY = bottomOffset(for: textView)
                 restore(offset: CGPoint(x: minX, y: maxY), in: textView)
+            }
+
+            func pageUp(_ textView: UITextView) {
+                scrollByPage(textView, direction: -1)
+            }
+
+            func pageDown(_ textView: UITextView) {
+                scrollByPage(textView, direction: 1)
             }
 
             private func isNearBottom(_ scrollView: UIScrollView, tolerance: CGFloat) -> Bool {
@@ -1519,18 +1705,36 @@ struct WindowDetailView: View {
             }
 
             func restore(offset: CGPoint, in textView: UITextView) {
-                let minX = -textView.adjustedContentInset.left
-                let minY = -textView.adjustedContentInset.top
-                let maxX = max(minX, textView.contentSize.width - textView.bounds.width + textView.adjustedContentInset.right)
-                let maxY = max(minY, textView.contentSize.height - textView.bounds.height + textView.adjustedContentInset.bottom)
+                restore(offset: offset, in: textView as UIScrollView)
+            }
+
+            func restore(offset: CGPoint, in scrollView: UIScrollView) {
+                let minX = -scrollView.adjustedContentInset.left
+                let minY = -scrollView.adjustedContentInset.top
+                let maxX = max(minX, scrollView.contentSize.width - scrollView.bounds.width + scrollView.adjustedContentInset.right)
+                let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
                 let restored = CGPoint(
                     x: min(max(offset.x, minX), maxX),
                     y: min(max(offset.y, minY), maxY)
                 )
 
                 UIView.performWithoutAnimation {
-                    textView.setContentOffset(restored, animated: false)
+                    scrollView.setContentOffset(restored, animated: false)
                 }
+            }
+
+            private func scrollByPage(_ textView: UITextView, direction: CGFloat) {
+                let visibleHeight = max(
+                    80,
+                    textView.bounds.height
+                        - textView.adjustedContentInset.top
+                        - textView.adjustedContentInset.bottom
+                )
+                let delta = visibleHeight * 0.88 * direction
+                restore(
+                    offset: CGPoint(x: textView.contentOffset.x, y: textView.contentOffset.y + delta),
+                    in: textView
+                )
             }
 
             func updateScrollableWidth(_ width: CGFloat, in textView: UITextView) {
