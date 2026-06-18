@@ -96,13 +96,6 @@ actor TmuxControlClient {
     }
 
     func disconnect() async {
-        if let writer {
-            var buffer = ByteBufferAllocator().buffer(capacity: "detach-client\n".utf8.count)
-            buffer.writeString("detach-client\n")
-            try? await writer.write(buffer)
-            try? await Task.sleep(nanoseconds: 200_000_000)
-        }
-
         lifecycleTask?.cancel()
         lifecycleTask = nil
         await connection.close()
