@@ -13,7 +13,7 @@ LOCAL_TARGET_HOST="${HERMIT_TUNNEL_LOCAL_TARGET_HOST:-127.0.0.1}"
 LOCAL_TARGET_PORT="${HERMIT_TUNNEL_LOCAL_TARGET_PORT:-22}"
 IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
 REMOTE_CLEANUP_ENABLED="${HERMIT_TUNNEL_REMOTE_CLEANUP_ENABLED:-1}"
-REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_ed25519}"
+REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/id_ed25519}"
 REMOTE_CLEANUP_MIN_AGE_SECONDS="${HERMIT_TUNNEL_REMOTE_CLEANUP_MIN_AGE_SECONDS:-120}"
 APP_DIR="$HOME/Library/Application Support/Hermit"
 LOG_DIR="$HOME/Library/Logs/Hermit"
@@ -283,18 +283,50 @@ remote_cleanup_ssh() {
 }
 
 remote_listener_occupied() {
-  remote_cleanup_ssh /usr/bin/python3 - "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'PY' >/dev/null 2>&1
+  remote_cleanup_ssh /bin/bash -s -- "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'REMOTE' >/dev/null 2>&1
+set -euo pipefail
+
+listen_host="$1"
+listen_port="$2"
+
+if command -v ss >/dev/null 2>&1; then
+  ss -H -ltn 2>/dev/null |
+    awk -v host="$listen_host" -v port="$listen_port" '
+      function matches(value) {
+        if (value == host ":" port) return 1
+        if (value == "[" host "]:" port) return 1
+        if (host == "127.0.0.1" && value == "localhost:" port) return 1
+        if (host == "127.0.0.1" && value == "0.0.0.0:" port) return 1
+        if (host == "127.0.0.1" && value == "*:" port) return 1
+        if (host == "::1" && value == "[::1]:" port) return 1
+        if (value == "[::]:" port) return 1
+        if (value == ":::" port) return 1
+        return 0
+      }
+      matches($4) { found = 1 }
+      END {
+        if (found) exit 0
+        exit 1
+      }
+    '
+  exit $?
+fi
+
+/usr/bin/python3 - "$listen_host" "$listen_port" <<'PY'
 import socket
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_STREAM)
 try:
-    with socket.create_connection((host, port), timeout=2):
-        pass
+    sock.bind((host, port))
 except OSError:
-    raise SystemExit(1)
+    raise SystemExit(0)
+raise SystemExit(1)
 PY
+REMOTE
 }
 
 clear_remote_port() {
@@ -326,17 +358,42 @@ min_age="$3"
 remote_user="$4"
 
 occupied() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -ltn 2>/dev/null |
+      awk -v host="$listen_host" -v port="$listen_port" '
+        function matches(value) {
+          if (value == host ":" port) return 1
+          if (value == "[" host "]:" port) return 1
+          if (host == "127.0.0.1" && value == "localhost:" port) return 1
+          if (host == "127.0.0.1" && value == "0.0.0.0:" port) return 1
+          if (host == "127.0.0.1" && value == "*:" port) return 1
+          if (host == "::1" && value == "[::1]:" port) return 1
+          if (value == "[::]:" port) return 1
+          if (value == ":::" port) return 1
+          return 0
+        }
+        matches($4) { found = 1 }
+        END {
+          if (found) exit 0
+          exit 1
+        }
+      '
+    return $?
+  fi
+
   /usr/bin/python3 - "$listen_host" "$listen_port" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+sock = socket.socket(family, socket.SOCK_STREAM)
 try:
-    with socket.create_connection((host, port), timeout=2):
-        pass
+    sock.bind((host, port))
 except OSError:
-    raise SystemExit(1)
+    raise SystemExit(0)
+raise SystemExit(1)
 PY
 }
 
@@ -355,10 +412,11 @@ mapfile -t candidates < <(
         $2=""
         sub(/^  */, "")
         if ($0 == "sshd: " remote_user && etimes >= min_age) {
-          print pid ":" etimes
+          print etimes ":" pid
         }
       }
-    '
+    ' |
+    sort -n
 )
 
 if [[ ${#candidates[@]} -eq 0 ]]; then
@@ -367,13 +425,17 @@ if [[ ${#candidates[@]} -eq 0 ]]; then
 fi
 
 for candidate in "${candidates[@]}"; do
-  pid="${candidate%%:*}"
-  age="${candidate#*:}"
+  age="${candidate%%:*}"
+  pid="${candidate#*:}"
   printf 'killing stale remote sshd child pid=%s age=%ss\n' "$pid" "$age"
   kill "$pid" 2>/dev/null || true
-done
+  sleep 1
 
-sleep 1
+  if ! occupied; then
+    printf 'remote listener cleared: %s:%s\n' "$listen_host" "$listen_port"
+    exit 0
+  fi
+done
 
 if occupied; then
   printf 'remote listener is still occupied after cleanup: %s:%s\n' "$listen_host" "$listen_port"
