@@ -15,6 +15,8 @@ IDENTITY_FILE="${HERMIT_TUNNEL_IDENTITY_FILE:-$HOME/.ssh/hermit_raghudt_reverse_
 REMOTE_CLEANUP_ENABLED="${HERMIT_TUNNEL_REMOTE_CLEANUP_ENABLED:-1}"
 REMOTE_CLEANUP_IDENTITY_FILE="${HERMIT_TUNNEL_REMOTE_CLEANUP_IDENTITY_FILE:-$HOME/.ssh/id_ed25519}"
 REMOTE_CLEANUP_MIN_AGE_SECONDS="${HERMIT_TUNNEL_REMOTE_CLEANUP_MIN_AGE_SECONDS:-120}"
+REMOTE_CLEANUP_COMMAND_TIMEOUT="${HERMIT_TUNNEL_REMOTE_CLEANUP_COMMAND_TIMEOUT:-30}"
+REMOTE_PROBE_COMMAND_TIMEOUT="${HERMIT_TUNNEL_REMOTE_PROBE_COMMAND_TIMEOUT:-10}"
 APP_DIR="$HOME/Library/Application Support/Hermit"
 LOG_DIR="$HOME/Library/Logs/Hermit"
 CONTROL_SOCKET="$APP_DIR/raghudt-tunnel.ctl"
@@ -271,7 +273,11 @@ remote_cleanup_ssh() {
     -x
     -o BatchMode=yes
     -o ConnectTimeout=10
+    -o ConnectionAttempts=1
+    -o ServerAliveInterval=10
+    -o ServerAliveCountMax=2
     -o StrictHostKeyChecking=accept-new
+    -o LogLevel=ERROR
     -p "$REMOTE_PORT"
   )
 
@@ -283,7 +289,7 @@ remote_cleanup_ssh() {
 }
 
 remote_listener_occupied() {
-  remote_cleanup_ssh /bin/bash -s -- "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'REMOTE' >/dev/null 2>&1
+  remote_cleanup_ssh /usr/bin/timeout "${REMOTE_PROBE_COMMAND_TIMEOUT}s" /bin/bash -s -- "$REMOTE_LISTEN_HOST" "$REMOTE_LISTEN_PORT" <<'REMOTE' >/dev/null 2>&1
 set -euo pipefail
 
 listen_host="$1"
@@ -345,7 +351,7 @@ clear_remote_port() {
     return 0
   fi
 
-  remote_cleanup_ssh /bin/bash -s -- \
+  remote_cleanup_ssh /usr/bin/timeout "${REMOTE_CLEANUP_COMMAND_TIMEOUT}s" /bin/bash -s -- \
     "$REMOTE_LISTEN_HOST" \
     "$REMOTE_LISTEN_PORT" \
     "$REMOTE_CLEANUP_MIN_AGE_SECONDS" \
