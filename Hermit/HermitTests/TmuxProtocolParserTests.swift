@@ -7,6 +7,50 @@ import XCTest
 #endif
 
 final class TmuxProtocolParserTests: XCTestCase {
+    func testInitialAttachAfterBracketedPasteDisable() {
+        var parser = TmuxProtocolParser()
+        let input = "\u{1B}[?2004l\r\u{1B}P1000p%begin 1 41 0\r\n%end 1 41 0\r\n"
+        XCTAssertEqual(parser.append(Data(input.utf8)), [
+            .commandStarted(commandNumber: 41),
+            .commandFinished(TmuxCommandBlock(commandNumber: 41, output: "", isError: false))
+        ])
+    }
+
+    func testInitialAttachWithShellPrefixAcrossChunks() {
+        let input = Data("user@host:~$ \u{1B}[?2004l\r\u{1B}P1000p%begin 1 41 0\r\n%end 1 41 0\r\n".utf8)
+        let expected: [TmuxProtocolMessage] = [
+            .commandStarted(commandNumber: 41),
+            .commandFinished(TmuxCommandBlock(commandNumber: 41, output: "", isError: false))
+        ]
+        for split in 0...input.count {
+            var parser = TmuxProtocolParser()
+            let first = parser.append(Data(input.prefix(split)))
+            let second = parser.append(Data(input.dropFirst(split)))
+            XCTAssertEqual(first + second, expected, "split at byte \(split)")
+        }
+    }
+
+    func testInitialAttachWithoutShellPrefix() {
+        var parser = TmuxProtocolParser()
+        let input = "\u{1B}P1000p%begin 1 41 0\n%end 1 41 0\n"
+        XCTAssertEqual(parser.append(Data(input.utf8)).count, 2)
+    }
+
+    func testInitialAttachErrorIsReported() {
+        var parser = TmuxProtocolParser()
+        let input = "\u{1B}[?2004l\r\u{1B}P1000p%begin 1 41 0\nattach failed\n%error 1 41 0\n"
+        XCTAssertEqual(parser.append(Data(input.utf8)).last,
+                       .commandFinished(TmuxCommandBlock(commandNumber: 41, output: "attach failed", isError: true)))
+    }
+
+    func testPreservesTerminalANSIWithinCapturedOutput() {
+        var parser = TmuxProtocolParser()
+        let output = "\u{1B}[31mred\u{1B}[0m\rredraw"
+        let input = "%begin 1 42 1\n\(output)\n%end 1 42 1\n"
+        XCTAssertEqual(parser.append(Data(input.utf8)).last,
+                       .commandFinished(TmuxCommandBlock(commandNumber: 42, output: output, isError: false)))
+    }
+
     func testParsesCommandBlocks() {
         var parser = TmuxProtocolParser()
         let input = """

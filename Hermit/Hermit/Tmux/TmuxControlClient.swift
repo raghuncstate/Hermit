@@ -18,6 +18,7 @@ actor TmuxControlClient {
     private var waitingForBegin: [CheckedContinuation<String, Error>] = []
     private var pendingCommands: [Int: CheckedContinuation<String, Error>] = [:]
     private var startContinuation: CheckedContinuation<Void, Error>?
+    private var startupTimeoutTask: Task<Void, Never>?
     private var didFinish = false
 
     init(connection: SSHClientConnection) {
@@ -45,6 +46,15 @@ actor TmuxControlClient {
         let command = TmuxLaunchCommand.controlMode(sessionName: sessionName, socketName: socketName, tmuxCommand: tmuxCommand)
         try await withCheckedThrowingContinuation { continuation in
             startContinuation = continuation
+            startupTimeoutTask = Task {
+                do {
+                    try await Task.sleep(for: .seconds(15))
+                } catch {
+                    return
+                }
+                guard startContinuation != nil else { return }
+                finish(error: TmuxProtocolError.startupTimedOut)
+            }
             lifecycleTask = Task { [sshClient] in
                 do {
                     try await sshClient.withPTY(
@@ -126,6 +136,8 @@ actor TmuxControlClient {
             // tmux emits an initial attach block before replies to client commands.
             if let continuation = startContinuation {
                 startContinuation = nil
+                startupTimeoutTask?.cancel()
+                startupTimeoutTask = nil
                 if block.isError {
                     continuation.resume(throwing: TmuxProtocolError.commandFailed(block.output))
                 } else {
@@ -165,6 +177,8 @@ actor TmuxControlClient {
     private func finish(error: Error) {
         guard !didFinish else { return }
         didFinish = true
+        startupTimeoutTask?.cancel()
+        startupTimeoutTask = nil
 
         writer = nil
         startContinuation?.resume(throwing: error)

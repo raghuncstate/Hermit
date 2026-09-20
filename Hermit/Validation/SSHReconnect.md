@@ -1,6 +1,41 @@
-# SSH shutdown regression, 1.3.1 (2026091901)
+# SSH connection regressions
 
-## Cause and fix
+## Linux startup and continuous-output hotfix, 1.3.2 (2026091902)
+
+The 1.3.1 startup acknowledgement check exposed an existing parser assumption:
+Ubuntu Bash emits a bracketed-paste-disable sequence and carriage return before
+tmux's `ESC P1000p` marker. Removing only the marker left a prefix before
+`%begin`, so the initial response was missed and connecting never completed.
+The previous Mac-only jump test did not exercise this Linux login-shell prefix.
+
+Discard the login-shell prefix up to the control-mode entry marker, preserving
+ordinary captured ANSI text. Add a 15-second startup acknowledgement timeout
+that closes only Hermit's SSH client, not the tmux server or its sessions.
+
+Real-network testing also exposed an unbounded capture loop: output arriving
+faster than each SSH round trip continually queued another capture, preventing
+input/navigation callers from returning. Complete one capture per invocation,
+coalesce broader pending history requests, and schedule follow-up reads in a
+separate task. Per-request identities and connection generations prevent an
+old read or timer from clearing work on a replacement connection.
+
+Verification:
+
+- The new Linux-prefix regression failed against the old parser; it passes
+  after the fix, including a split at every byte boundary.
+- All 59 Hermit tests and all 356 pinned NIOSSH tests passed.
+- iPhone 17 Pro Max / iOS 26.5 simulator: window selection, continuously changing
+  output, and 10 reconnect/read-in-flight shutdown cycles passed on each route:
+  remote Linux SSH, direct Mac SSH, and Mac SSH through the remote Linux jump
+  host and the existing reverse tunnel. All tests used separate tmux sockets.
+- Read-only before/after comparison preserved all 21 Mac and 12 remote Linux
+  live windows, including their window IDs, pane IDs, and pane process IDs.
+- The release archive excludes the simulator profile/key loader and self-test
+  code. Test keys and test profile data are never bundled.
+
+## SSH shutdown regression, 1.3.1 (2026091901)
+
+### Cause and fix
 
 The two TestFlight reports from September 19, 2026, both trapped in
 `ChildChannelStateMachine.sendChannelWindowAdjust`, called while an SSH channel
@@ -18,7 +53,7 @@ client now waits for the attach response before becoming ready. Workspace
 operations ignore cancellation and replies from superseded connections instead
 of dropping or reopening the replacement connection.
 
-## Verification
+### Verification
 
 - Removed only the new SSH guard in a disposable dependency checkout: the
   upstream regression test reproduced the exact fatal assertion and SIGTRAP.
@@ -55,9 +90,17 @@ Pass these variables to `simctl launch` with the `SIMCTL_CHILD_` prefix:
 | `HERMIT_SIM_TMUX_SOCKET` | Disposable test socket name |
 | `HERMIT_SIM_SELFTEST_SWITCH` | `1` |
 | `HERMIT_SIM_RECONNECT_CYCLES` | `30` |
-| `HERMIT_SIM_SELFTEST_JUMP` | `1` to SSH through the same test host |
+| `HERMIT_SIM_SELFTEST_JUMP` | `1` to enable SSH jump-host testing |
+| `HERMIT_SIM_JUMP_HOST` / `HERMIT_SIM_JUMP_PORT` / `HERMIT_SIM_JUMP_USER` | Jump endpoint; defaults to target endpoint |
+| `HERMIT_SIM_TMUX_COMMAND` | Optional executable override; `/usr/bin/false` tests the startup timeout without starting tmux |
 
 Results are written to the app's `Documents/hermit-sim-selftest.json`. Require
 `success: true`, the requested number of completed reconnect cycles, and no
 failed window or reconnect results. Save direct and jump results separately.
+Test a real Linux login shell with bracketed paste enabled, not just a Mac-to-Mac
+jump. For a reverse tunnel, the target is the loopback address/forwarded port on
+the jump host; the disposable tmux socket belongs on the destination Mac.
+Report phases and `startedAt` distinguish a new test from an older saved result.
+The intentional startup-timeout test must report the 15-second error instead of
+remaining in `connecting`; it is expected to report `success: false`.
 After testing, stop only the disposable server using its explicit `-L` socket.

@@ -821,7 +821,8 @@ final class DataStore {
             username: environment["HERMIT_SIM_USER"] ?? NSUserName(),
             privateKeyRef: keyRef,
             defaultTmuxSessionName: environment["HERMIT_SIM_TMUX_SESSION"] ?? "0",
-            tmuxSocketName: environment["HERMIT_SIM_TMUX_SOCKET"]
+            tmuxSocketName: environment["HERMIT_SIM_TMUX_SOCKET"],
+            tmuxCommand: environment["HERMIT_SIM_TMUX_COMMAND"]
         )
 
         if let index = hosts.firstIndex(where: { $0.id == hostID }) {

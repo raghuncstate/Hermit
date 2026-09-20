@@ -4,6 +4,7 @@ import Foundation
 struct Runner {
     static func main() throws {
         try testCommandBlocks()
+        try testInitialControlModeWithShellPrefix()
         try testCommandErrors()
         try testOctalOutput()
         try testOutputAcrossChunks()
@@ -37,6 +38,20 @@ struct Runner {
         """
         let messages = parser.append(Data(input.utf8))
         precondition(messages.last == .commandFinished(TmuxCommandBlock(commandNumber: 43, output: "no such pane", isError: true)))
+    }
+
+    private static func testInitialControlModeWithShellPrefix() throws {
+        let input = Data("user@host:~$ \u{1B}[?2004l\r\u{1B}P1000p%begin 1 41 0\r\n%end 1 41 0\r\n".utf8)
+        let expected: [TmuxProtocolMessage] = [
+            .commandStarted(commandNumber: 41),
+            .commandFinished(TmuxCommandBlock(commandNumber: 41, output: "", isError: false))
+        ]
+        for split in 0...input.count {
+            var parser = TmuxProtocolParser()
+            let first = parser.append(Data(input.prefix(split)))
+            let second = parser.append(Data(input.dropFirst(split)))
+            precondition(first + second == expected, "Initial tmux handshake lost at byte \(split)")
+        }
     }
 
     private static func testOctalOutput() throws {

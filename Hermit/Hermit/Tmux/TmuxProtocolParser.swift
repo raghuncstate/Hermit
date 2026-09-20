@@ -4,6 +4,7 @@ enum TmuxProtocolError: LocalizedError, Equatable {
     case commandFailed(String)
     case malformedControlLine(String)
     case disconnected
+    case startupTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum TmuxProtocolError: LocalizedError, Equatable {
             "Malformed tmux control line: \(line)"
         case .disconnected:
             "tmux control session disconnected"
+        case .startupTimedOut:
+            "SSH connected, but tmux did not finish starting within 15 seconds. Check that tmux is installed and available in the login shell."
         }
     }
 }
@@ -244,9 +247,14 @@ struct TmuxProtocolParser {
     }
 
     private static func normalizedControlLine(_ line: String) -> String {
-        line
-            .replacingOccurrences(of: "\u{1B}P1000p", with: "")
-            .replacingOccurrences(of: "\u{1B}\\", with: "")
+        // Bash can leave a prompt or bracketed-paste sequence before tmux's DCS marker.
+        let controlLine: Substring
+        if let marker = line.range(of: "\u{1B}P1000p") {
+            controlLine = line[marker.upperBound...]
+        } else {
+            controlLine = line[...]
+        }
+        return controlLine.replacingOccurrences(of: "\u{1B}\\", with: "")
     }
 
     private static func commandNumber(in line: String) -> Int? {

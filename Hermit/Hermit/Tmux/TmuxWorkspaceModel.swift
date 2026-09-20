@@ -66,7 +66,7 @@ final class TmuxWorkspaceModel {
     private var followedPaneIds: Set<String> = []
     private var outputCaptureTasks: [String: Task<Void, Never>] = [:]
     private var livePollTasks: [String: Task<Void, Never>] = [:]
-    private var captureInFlightPaneIds: Set<String> = []
+    private var captureRequests: [String: UUID] = [:]
     private var pendingCaptureHistoryLimits: [String: Int] = [:]
     private var sparseFrameSkipCounts: [String: Int] = [:]
     private var pendingLocalEchoByPane: [String: PendingLocalEcho] = [:]
@@ -125,7 +125,7 @@ final class TmuxWorkspaceModel {
         outputCaptureTasks.removeAll()
         livePollTasks.values.forEach { $0.cancel() }
         livePollTasks.removeAll()
-        captureInFlightPaneIds.removeAll()
+        captureRequests.removeAll()
         pendingCaptureHistoryLimits.removeAll()
         sparseFrameSkipCounts.removeAll()
         pendingLocalEchoByPane.removeAll()
@@ -235,41 +235,44 @@ final class TmuxWorkspaceModel {
     }
 
     private func capture(paneId: String, historyLimit: Int) async {
-        if captureInFlightPaneIds.contains(paneId) {
+        guard !Task.isCancelled else { return }
+        if captureRequests[paneId] != nil {
             queuePendingCapture(paneId: paneId, historyLimit: historyLimit)
             return
         }
 
-        captureInFlightPaneIds.insert(paneId)
-        defer { captureInFlightPaneIds.remove(paneId) }
+        let requestID = UUID()
+        captureRequests[paneId] = requestID
+        let requestedHistoryLimit = pendingCaptureHistoryLimits.removeValue(forKey: paneId)
+            .map { broaderHistoryLimit($0, historyLimit) } ?? historyLimit
+        defer {
+            // An old connection's read must not clear a replacement connection's work.
+            if captureRequests[paneId] == requestID {
+                captureRequests[paneId] = nil
+                schedulePendingCapture(paneId: paneId)
+            }
+        }
 
-        var nextHistoryLimit: Int? = historyLimit
-        while let currentHistoryLimit = nextHistoryLimit {
-            nextHistoryLimit = nil
+        do {
+            let rawText = try await withConnectedClient { client in
+                try await client.capturePane(paneId: paneId, historyLimit: requestedHistoryLimit)
+            }
+            let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
 
-            do {
-                let rawText = try await withConnectedClient { client in
-                    try await client.capturePane(paneId: paneId, historyLimit: currentHistoryLimit)
+            if shouldAcceptCapture(displayText, paneId: paneId, historyLimit: requestedHistoryLimit) {
+                if snapshotsByPane[paneId]?.rawText != displayText {
+                    snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: displayText)
                 }
-                let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
-
-                if shouldAcceptCapture(displayText, paneId: paneId, historyLimit: currentHistoryLimit) {
-                    if snapshotsByPane[paneId]?.rawText != displayText {
-                        snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: displayText)
-                    }
-                } else {
-                    scheduleOutputCapture(paneId: paneId)
-                }
-
-                errorMessage = nil
-            } catch {
-                handle(error)
-                break
+            } else {
+                scheduleOutputCapture(paneId: paneId)
             }
 
-            if let pendingHistoryLimit = pendingCaptureHistoryLimits.removeValue(forKey: paneId) {
-                nextHistoryLimit = pendingHistoryLimit
+            errorMessage = nil
+        } catch {
+            if captureRequests[paneId] == requestID {
+                pendingCaptureHistoryLimits[paneId] = nil
             }
+            handle(error)
         }
     }
 
@@ -693,20 +696,27 @@ final class TmuxWorkspaceModel {
 
     private func scheduleOutputCapture(paneId: String) {
         guard followedPaneIds.contains(paneId) else { return }
-        guard outputCaptureTasks[paneId] == nil else { return }
-
-        outputCaptureTasks[paneId] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.outputCaptureIntervalNanoseconds)
-            await self?.captureScheduledOutput(for: paneId)
-        }
+        queuePendingCapture(paneId: paneId, historyLimit: Self.liveCaptureHistoryLimit)
+        schedulePendingCapture(paneId: paneId)
     }
 
-    private func captureScheduledOutput(for paneId: String) async {
-        outputCaptureTasks[paneId] = nil
-        if let pane = pane(withId: paneId) {
-            await captureLive(pane)
-        } else {
-            await captureLive(paneId: paneId)
+    private func schedulePendingCapture(paneId: String) {
+        guard pendingCaptureHistoryLimits[paneId] != nil,
+              captureRequests[paneId] == nil,
+              outputCaptureTasks[paneId] == nil else { return }
+        let generation = connectionGeneration
+        // Continuous output may always enqueue another read. Never drain it in the
+        // caller's task: input and navigation must finish after one SSH round trip.
+        outputCaptureTasks[paneId] = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.outputCaptureIntervalNanoseconds)
+            } catch {
+                return
+            }
+            guard let self, isCurrentConnectionGeneration(generation) else { return }
+            outputCaptureTasks[paneId] = nil
+            guard let historyLimit = pendingCaptureHistoryLimits.removeValue(forKey: paneId) else { return }
+            await capture(paneId: paneId, historyLimit: historyLimit)
         }
     }
 
@@ -946,7 +956,7 @@ final class TmuxWorkspaceModel {
             switch tmuxError {
             case .disconnected:
                 return true
-            case .commandFailed, .malformedControlLine:
+            case .commandFailed, .malformedControlLine, .startupTimedOut:
                 return false
             }
         }
@@ -967,7 +977,7 @@ final class TmuxWorkspaceModel {
         outputCaptureTasks.removeAll()
         livePollTasks.values.forEach { $0.cancel() }
         livePollTasks.removeAll()
-        captureInFlightPaneIds.removeAll()
+        captureRequests.removeAll()
         pendingCaptureHistoryLimits.removeAll()
         sparseFrameSkipCounts.removeAll()
         followedPaneIds.removeAll()

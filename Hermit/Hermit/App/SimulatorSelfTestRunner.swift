@@ -17,7 +17,8 @@ enum SimulatorSelfTestRunner {
         var report: [String: Any] = [
             "host": hostName,
             "session": sessionName,
-            "requestedWindows": windowNames
+            "requestedWindows": windowNames,
+            "startedAt": ISO8601DateFormatter().string(from: Date())
         ]
 
         guard var host = dataStore.hosts.first(where: { $0.displayName == hostName }) else {
@@ -29,13 +30,17 @@ enum SimulatorSelfTestRunner {
 
         if environment["HERMIT_SIM_SELFTEST_JUMP"] == "1" {
             host.jumpHost = SSHJumpHost(
-                hostname: host.hostname, port: host.port,
-                username: host.username, privateKeyRef: host.privateKeyRef
+                hostname: environment["HERMIT_SIM_JUMP_HOST"] ?? host.hostname,
+                port: Int(environment["HERMIT_SIM_JUMP_PORT"] ?? "") ?? host.port,
+                username: environment["HERMIT_SIM_JUMP_USER"] ?? host.username,
+                privateKeyRef: host.privateKeyRef
             )
         }
         report["jumpHost"] = host.jumpHost != nil
 
         let model = TmuxWorkspaceModel(host: host)
+        report["phase"] = "connecting"
+        write(report)
         await model.connectIfNeeded()
 
         guard model.status == .connected else {
@@ -46,6 +51,8 @@ enum SimulatorSelfTestRunner {
         }
 
         await model.refreshSessions()
+        report["phase"] = "connected"
+        write(report)
 
         guard let session = model.sessions.first(where: { $0.name == sessionName }) else {
             report["success"] = false
@@ -56,12 +63,16 @@ enum SimulatorSelfTestRunner {
             return
         }
 
+        report["phase"] = "refreshing windows"
+        write(report)
         await model.refreshWindows(for: session)
 
         var results: [[String: Any]] = []
         var success = true
 
         for name in windowNames {
+            report["phase"] = "selecting \(name)"
+            write(report)
             guard let window = model.windows(for: session).first(where: { $0.name == name }) else {
                 success = false
                 results.append(["window": name, "success": false, "error": "window not found"])
@@ -92,6 +103,8 @@ enum SimulatorSelfTestRunner {
         let reconnectCycles = min(100, max(0, Int(environment["HERMIT_SIM_RECONNECT_CYCLES"] ?? "0") ?? 0))
         var reconnectResults: [[String: Any]] = []
         for cycle in 0..<reconnectCycles {
+            report["phase"] = "reconnecting \(cycle + 1)"
+            write(report)
             await model.reconnect()
             guard model.status == .connected,
                   let currentSession = model.sessions.first(where: { $0.id == session.id }) else {
@@ -141,6 +154,7 @@ enum SimulatorSelfTestRunner {
         }
 
         report["success"] = success
+        report["phase"] = "finished"
         report["results"] = results
         report["reconnectResults"] = reconnectResults
         write(report)
