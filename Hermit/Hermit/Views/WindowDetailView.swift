@@ -97,6 +97,7 @@ struct WindowDetailView: View {
     @State private var commandIdleSubmitTask: Task<Void, Never>?
     @State private var showingVoiceModal = false
     @State private var showingWindowSwitcher = false
+    @State private var keyModifiers = TmuxKeyModifiers()
     @State private var windowSwitcherScope: WindowSwitcherScope = .currentSession
     @State private var voiceText = ""
     @State private var follow = true
@@ -238,9 +239,14 @@ struct WindowDetailView: View {
             await model.captureLive(pane)
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase != .active { keyModifiers.shift = false }
             handleScenePhaseChange(phase)
         }
+        .onChange(of: selectedPane?.id) { _, _ in
+            keyModifiers.shift = false
+        }
         .onDisappear {
+            keyModifiers.shift = false
             activationRefreshTask?.cancel()
             commandIdleSubmitTask?.cancel()
         }
@@ -726,32 +732,49 @@ struct WindowDetailView: View {
     }
 
     private var macroRibbon: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .center, spacing: 8) {
-                ForEach(TmuxMacro.defaults) { macro in
-                    Button {
-                        sendMacro(macro)
-                    } label: {
-                        if let systemImage = macro.systemImage {
-                            Image(systemName: systemImage)
-                                .frame(width: 50, height: 38, alignment: .center)
-                        } else {
-                            Text(macro.label)
-                                .font(.system(.caption, weight: .semibold))
-                                .multilineTextAlignment(.center)
-                                .frame(width: 50, height: 38, alignment: .center)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.roundedRectangle)
-                    .accessibilityLabel(macro.label)
-                }
+        HStack(alignment: .center, spacing: 8) {
+            Toggle(isOn: $keyModifiers.shift) {
+                Image(systemName: keyModifiers.shift ? "shift.fill" : "shift")
+                    .frame(width: 30, height: 38)
             }
-            .padding(.horizontal)
-            .padding(.top, 4)
-            .padding(.bottom, 6)
+            .toggleStyle(.button)
+            .buttonBorderShape(.roundedRectangle)
+            .disabled(selectedPane == nil)
+            .accessibilityLabel("Shift")
+            .accessibilityValue(keyModifiers.shift ? "On for next key" : "Off")
+            .accessibilityIdentifier("tmux-shift")
+            .help("Shift for next Tab or arrow")
+            .padding(.leading)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 8) {
+                    ForEach(TmuxMacro.defaults) { macro in
+                        Button {
+                            sendMacro(macro)
+                        } label: {
+                            if let systemImage = macro.systemImage {
+                                Image(systemName: systemImage)
+                                    .frame(width: 50, height: 38, alignment: .center)
+                            } else {
+                                Text(macro.label)
+                                    .font(.system(.caption, weight: .semibold))
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: 50, height: 38, alignment: .center)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle)
+                        .accessibilityLabel(keyModifiers.resolve(macro).label)
+                        .accessibilityIdentifier("tmux-key-\(macro.key)")
+                        .help(keyModifiers.resolve(macro).label)
+                    }
+                }
+                .padding(.trailing)
+            }
         }
+        .padding(.top, 4)
+        .padding(.bottom, 6)
         .background(.regularMaterial)
     }
 
@@ -795,6 +818,7 @@ struct WindowDetailView: View {
 
     private func handleCommandTextChange(to newValue: String) {
         guard !suppressInputChange else { return }
+        keyModifiers.shift = false
 
         let submitPhraseResult = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: newValue)
         if submitPhraseResult.shouldSubmit {
@@ -844,6 +868,7 @@ struct WindowDetailView: View {
     }
 
     private func submitCommandBoxText(_ text: String, allowEmpty: Bool) {
+        keyModifiers.shift = false
         let command = text
         guard allowEmpty || !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let pane = selectedPane else { return }
@@ -974,6 +999,7 @@ struct WindowDetailView: View {
 
     private func sendMacro(_ macro: TmuxMacro) {
         guard let pane = selectedPane else { return }
+        let macro = keyModifiers.consume(macro)
         if macro.preservesViewport {
             follow = false
             model.setFollow(pane.id, enabled: false)
@@ -1002,6 +1028,7 @@ struct WindowDetailView: View {
     }
 
     private func switchToWindow(_ tmuxWindow: TmuxWindow, in tmuxSession: TmuxSession? = nil) {
+        keyModifiers.shift = false
         let targetSession = tmuxSession ?? session(for: tmuxWindow)
         selectedSessionId = targetSession.id
         selectedWindowId = tmuxWindow.id

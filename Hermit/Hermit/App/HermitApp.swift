@@ -41,7 +41,7 @@ struct HermitApp: App {
                 }
                 #if DEBUG && targetEnvironment(simulator)
                 .task {
-                    await SimulatorSelfTestRunner.runIfRequested(dataStore: dataStore)
+                    await SimulatorSelfTestRunner.runIfRequested(dataStore: dataStore, navigator: navigator)
                 }
                 #endif
         }

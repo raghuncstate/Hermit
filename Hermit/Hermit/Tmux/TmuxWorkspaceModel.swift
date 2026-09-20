@@ -38,6 +38,29 @@ struct TmuxMacro: Identifiable, Hashable {
     ]
 }
 
+struct TmuxKeyModifiers {
+    var shift = false
+
+    func resolve(_ macro: TmuxMacro) -> TmuxMacro {
+        guard shift, !macro.sendsLiteralText else { return macro }
+        let key: String
+        switch macro.key {
+        case "Tab": key = "BTab"
+        case "Up", "Down", "Left", "Right": key = "S-\(macro.key)"
+        default: return macro
+        }
+        var modified = macro
+        modified.key = key
+        modified.label = "Shift+\(macro.label)"
+        return modified
+    }
+
+    mutating func consume(_ macro: TmuxMacro) -> TmuxMacro {
+        defer { shift = false }
+        return resolve(macro)
+    }
+}
+
 @MainActor
 @Observable
 final class TmuxWorkspaceModel {

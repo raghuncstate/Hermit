@@ -85,6 +85,42 @@ struct ModelTests {
         #expect(TmuxMacro.defaults.first { $0.label == "Ctrl-U" }?.key == "C-u")
     }
 
+    @Test(arguments: ["Tab", "Up", "Down", "Left", "Right"])
+    func shiftedToolbarKeysUseTmuxKeyNames(key: String) throws {
+        let macro = try #require(TmuxMacro.defaults.first { $0.key == key })
+        var modifiers = TmuxKeyModifiers(shift: true)
+        let modified = modifiers.consume(macro)
+        #expect(modified.key == (key == "Tab" ? "BTab" : "S-\(key)"))
+        #expect(modified.label == "Shift+\(macro.label)")
+        #expect(modified.preservesViewport == macro.preservesViewport)
+        #expect(!modifiers.shift)
+        #expect(modifiers.consume(macro) == macro)
+    }
+
+    @Test func shiftPreviewDoesNotConsumeModifier() throws {
+        let macro = try #require(TmuxMacro.defaults.first { $0.key == "Tab" })
+        let modifiers = TmuxKeyModifiers(shift: true)
+        #expect(modifiers.resolve(macro).key == "BTab")
+        #expect(modifiers.shift)
+    }
+
+    @Test func shiftLeavesOtherToolbarKeysAndLiteralTextUnchanged() {
+        let unchanged = TmuxMacro.defaults.filter { !["Tab", "Up", "Down", "Left", "Right"].contains($0.key) }
+            + [TmuxMacro(label: "Literal", key: "Up", sendsLiteralText: true)]
+        for macro in unchanged {
+            var modifiers = TmuxKeyModifiers(shift: true)
+            #expect(modifiers.consume(macro) == macro)
+            #expect(!modifiers.shift)
+        }
+    }
+
+    @Test func unshiftedToolbarKeysAreUnchanged() {
+        var modifiers = TmuxKeyModifiers()
+        for macro in TmuxMacro.defaults {
+            #expect(modifiers.consume(macro) == macro)
+        }
+    }
+
     @Test func claudePanesPreferTerminalPager() {
         let titledClaudePane = TmuxPane(
             id: "%1",

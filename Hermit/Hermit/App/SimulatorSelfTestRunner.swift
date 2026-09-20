@@ -3,7 +3,7 @@ import Foundation
 #if DEBUG && targetEnvironment(simulator)
 @MainActor
 enum SimulatorSelfTestRunner {
-    static func runIfRequested(dataStore: DataStore) async {
+    static func runIfRequested(dataStore: DataStore, navigator: AppNavigator) async {
         let environment = ProcessInfo.processInfo.environment
         guard environment["HERMIT_SIM_SELFTEST_SWITCH"] == "1" else { return }
 
@@ -66,6 +66,20 @@ enum SimulatorSelfTestRunner {
         report["phase"] = "refreshing windows"
         write(report)
         await model.refreshWindows(for: session)
+
+        if environment["HERMIT_SIM_SELFTEST_KEYS"] == "1" {
+            let keyReport = await testShiftKeys(model: model, session: session)
+            report.merge(keyReport) { _, new in new }
+            report["phase"] = "finished"
+            write(report)
+            await model.disconnect()
+            if environment["HERMIT_SIM_SHOW_TEST_WINDOW"] == "1",
+               keyReport["success"] as? Bool == true,
+               let window = model.windows(for: session).first(where: { $0.name == "keys" }) {
+                navigator.open(TmuxShortcut(kind: .window, host: host, session: session, window: window))
+            }
+            return
+        }
 
         var results: [[String: Any]] = []
         var success = true
@@ -159,6 +173,58 @@ enum SimulatorSelfTestRunner {
         report["reconnectResults"] = reconnectResults
         write(report)
         await model.disconnect()
+    }
+
+    private static func testShiftKeys(model: TmuxWorkspaceModel, session: TmuxSession) async -> [String: Any] {
+        guard model.host.tmuxSocketName?.hasPrefix("hermit-test-") == true,
+              let window = model.windows(for: session).first(where: { $0.name == "keys" }) else {
+            return ["success": false, "error": "Key test requires an isolated hermit-test- socket and keys window"]
+        }
+        await model.loadWindow(window)
+        guard let pane = model.activePane(for: window) else {
+            return ["success": false, "error": "Key test pane missing"]
+        }
+        model.setFollow(pane.id, enabled: false)
+        await model.captureLive(pane)
+        guard model.snapshotsByPane[pane.id]?.rawText.contains("HERMIT_KEY_TEST_READY") == true else {
+            return ["success": false, "error": "Refusing to send test keys without the raw key-reader marker"]
+        }
+
+        let cases = [
+            ("Tab", "1b5b5a", "09"),
+            ("Up", "1b5b313b3241", "1b5b41"),
+            ("Down", "1b5b313b3242", "1b5b42"),
+            ("Left", "1b5b313b3244", "1b5b44"),
+            ("Right", "1b5b313b3243", "1b5b43")
+        ]
+        var results: [[String: Any]] = []
+        for (key, shiftedHex, plainHex) in cases {
+            guard let macro = TmuxMacro.defaults.first(where: { $0.key == key }) else { continue }
+            var modifiers = TmuxKeyModifiers(shift: true)
+            for expectedHex in [shiftedHex, plainHex] {
+                let sentMacro = modifiers.consume(macro)
+                await model.send(sentMacro, to: pane)
+                let expectedLine = "KEY_\(results.count + 1)=\(expectedHex)"
+                var received = false
+                for _ in 0..<30 {
+                    await model.captureLive(pane)
+                    if model.snapshotsByPane[pane.id]?.rawText.contains(expectedLine) == true {
+                        received = true
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                results.append([
+                    "key": sentMacro.label, "tmuxKey": sentMacro.key,
+                    "expectedBytes": expectedHex, "received": received,
+                    "shiftReset": !modifiers.shift, "success": received && !modifiers.shift
+                ])
+                if !received {
+                    return ["success": false, "keyResults": results, "error": "Key byte mismatch or timeout"]
+                }
+            }
+        }
+        return ["success": results.count == 10, "keyResults": results]
     }
 
     private static func write(_ report: [String: Any]) {
