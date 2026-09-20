@@ -14,7 +14,7 @@ struct WindowDetailView: View {
         case down
 
         static func forFingerSwipe(translationY: CGFloat) -> TerminalPageDirection {
-            translationY < 0 ? .up : .down
+            translationY > 0 ? .up : .down
         }
 
         var macro: TmuxMacro {
@@ -1296,6 +1296,10 @@ struct WindowDetailView: View {
         follow = false
         model.setFollow(pane.id, enabled: false)
         await model.send(direction.macro, to: pane)
+        for delay in [70_000_000, 140_000_000, 260_000_000] as [UInt64] {
+            try? await Task.sleep(nanoseconds: delay)
+            await model.captureLive(pane)
+        }
     }
 
     private func pauseFollowForManualPaneScroll(_ pane: TmuxPane) {
@@ -1426,16 +1430,10 @@ struct WindowDetailView: View {
             )
             textView.refreshControl = refreshControl
 
-            let pagerPan = UIPanGestureRecognizer(
-                target: context.coordinator,
+            textView.panGestureRecognizer.addTarget(
+                context.coordinator,
                 action: #selector(Coordinator.terminalPagerPan(_:))
             )
-            pagerPan.delegate = context.coordinator
-            pagerPan.cancelsTouchesInView = false
-            pagerPan.delaysTouchesBegan = false
-            textView.addGestureRecognizer(pagerPan)
-            textView.panGestureRecognizer.require(toFail: pagerPan)
-            context.coordinator.terminalPagerPanGesture = pagerPan
 
             return textView
         }
@@ -1552,15 +1550,18 @@ struct WindowDetailView: View {
             return output
         }
 
-        final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
-            private static let terminalPagerSwipeThreshold: CGFloat = 44
+        final class Coordinator: NSObject, UITextViewDelegate {
+            private static let terminalPagerSwipeThreshold: CGFloat = 32
+            private static let terminalPagerFlickMinimumDistance: CGFloat = 12
+            private static let terminalPagerFlickVelocityThreshold: CGFloat = 240
+            private static let terminalPagerRepeatDistance: CGFloat = 84
+            private static let maximumPagerEventsPerGestureUpdate = 3
 
             var usesTerminalPagerScroll: Bool
             var onManualScrollAwayFromBottom: () -> Void
             var onManualScrollToBottom: () -> Void
             var onTerminalPagerScroll: (TerminalPageDirection) -> Void
             var onRefresh: (@escaping () -> Void) -> Void
-            weak var terminalPagerPanGesture: UIPanGestureRecognizer?
             var rawText = ""
             var displayText = ""
             var fontSize: CGFloat = 0
@@ -1568,10 +1569,10 @@ struct WindowDetailView: View {
             var scrollToken = -1
             var isProgrammaticScroll = false
             private var terminalPagerStartOffset: CGPoint?
+            private var terminalPagerLastStep = 0
             private var dragStartOffset: CGPoint?
             private var didHandleManualScrollAwayFromBottom = false
             private var didHandleManualScrollToBottom = false
-            private var didHandleTerminalPagerScroll = false
 
             init(
                 usesTerminalPagerScroll: Bool,
@@ -1601,54 +1602,53 @@ struct WindowDetailView: View {
                     return
                 }
 
+                let translation = recognizer.translation(in: scrollView)
+                guard abs(translation.y) >= abs(translation.x) else { return }
+
                 switch recognizer.state {
                 case .began:
                     terminalPagerStartOffset = scrollView.contentOffset
-                    didHandleTerminalPagerScroll = false
+                    terminalPagerLastStep = 0
                 case .changed:
-                    let translation = recognizer.translation(in: scrollView)
-                    let verticalDelta = abs(translation.y)
-                    guard verticalDelta >= Self.terminalPagerSwipeThreshold else {
-                        restoreTerminalPagerOffset(in: scrollView)
-                        return
-                    }
-
-                    didHandleTerminalPagerScroll = true
-                    onTerminalPagerScroll(.forFingerSwipe(translationY: translation.y))
-                    recognizer.setTranslation(.zero, in: scrollView)
+                    handleTerminalPagerTranslation(translation.y)
                     restoreTerminalPagerOffset(in: scrollView)
-                case .ended, .cancelled, .failed:
+                case .ended:
+                    let velocity = recognizer.velocity(in: scrollView)
+                    handleTerminalPagerCompletion(translationY: translation.y, velocityY: velocity.y)
                     restoreTerminalPagerOffset(in: scrollView)
                     terminalPagerStartOffset = nil
-                    didHandleTerminalPagerScroll = false
+                case .cancelled, .failed:
+                    restoreTerminalPagerOffset(in: scrollView)
+                    terminalPagerStartOffset = nil
+                    terminalPagerLastStep = 0
                 default:
                     break
                 }
             }
 
-            func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-                guard usesTerminalPagerScroll,
-                      gestureRecognizer === terminalPagerPanGesture,
-                      let pan = gestureRecognizer as? UIPanGestureRecognizer,
-                      let view = pan.view else {
-                    return false
-                }
-
-                let velocity = pan.velocity(in: view)
-                return abs(velocity.y) > abs(velocity.x)
-            }
-
             func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll else { return }
                 dragStartOffset = scrollView.contentOffset
+                terminalPagerLastStep = 0
                 didHandleManualScrollAwayFromBottom = false
                 didHandleManualScrollToBottom = false
-                didHandleTerminalPagerScroll = false
             }
 
             func scrollViewDidScroll(_ scrollView: UIScrollView) {
                 guard !isProgrammaticScroll,
                       let dragStartOffset else {
+                    return
+                }
+
+                if usesTerminalPagerScroll {
+                    let pan = scrollView.panGestureRecognizer
+                    let translation = pan.translation(in: scrollView)
+                    let horizontalDelta = abs(translation.x)
+                    let verticalDelta = abs(translation.y)
+                    guard verticalDelta >= horizontalDelta else { return }
+
+                    handleTerminalPagerTranslation(translation.y)
+                    restoreVerticalOffset(to: dragStartOffset.y, in: scrollView)
                     return
                 }
 
@@ -1662,16 +1662,6 @@ struct WindowDetailView: View {
                 guard verticalDelta > 8, verticalDelta >= deltaX else { return }
 
                 let movedTowardHistory = deltaY < -8
-                if usesTerminalPagerScroll {
-                    guard verticalDelta > 28, !didHandleTerminalPagerScroll else { return }
-                    didHandleTerminalPagerScroll = true
-                    onTerminalPagerScroll(.forFingerSwipe(translationY: -deltaY))
-                    isProgrammaticScroll = true
-                    restore(offset: dragStartOffset, in: scrollView)
-                    isProgrammaticScroll = false
-                    return
-                }
-
                 if movedTowardHistory {
                     guard !didHandleManualScrollAwayFromBottom else { return }
                     didHandleManualScrollAwayFromBottom = true
@@ -1687,19 +1677,31 @@ struct WindowDetailView: View {
             }
 
             func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+                if usesTerminalPagerScroll {
+                    let pan = scrollView.panGestureRecognizer
+                    let translation = pan.translation(in: scrollView)
+                    let velocity = pan.velocity(in: scrollView)
+                    if abs(translation.y) >= abs(translation.x) {
+                        handleTerminalPagerCompletion(translationY: translation.y, velocityY: velocity.y)
+                        restoreVerticalOffset(to: dragStartOffset?.y ?? scrollView.contentOffset.y, in: scrollView)
+                    }
+                }
+
                 if !decelerate {
                     dragStartOffset = nil
+                    if !usesTerminalPagerScroll {
+                        terminalPagerLastStep = 0
+                    }
                     didHandleManualScrollAwayFromBottom = false
                     didHandleManualScrollToBottom = false
-                    didHandleTerminalPagerScroll = false
                 }
             }
 
             func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
                 dragStartOffset = nil
+                terminalPagerLastStep = 0
                 didHandleManualScrollAwayFromBottom = false
                 didHandleManualScrollToBottom = false
-                didHandleTerminalPagerScroll = false
             }
 
             func textViewDidChangeSelection(_ textView: UITextView) {
@@ -1789,9 +1791,57 @@ struct WindowDetailView: View {
 
             private func restoreTerminalPagerOffset(in scrollView: UIScrollView) {
                 guard let terminalPagerStartOffset else { return }
+                restoreVerticalOffset(to: terminalPagerStartOffset.y, in: scrollView)
+            }
+
+            private func restoreVerticalOffset(to yOffset: CGFloat, in scrollView: UIScrollView) {
                 isProgrammaticScroll = true
-                restore(offset: terminalPagerStartOffset, in: scrollView)
+                restore(offset: CGPoint(x: scrollView.contentOffset.x, y: yOffset), in: scrollView)
                 isProgrammaticScroll = false
+            }
+
+            private func handleTerminalPagerCompletion(translationY: CGFloat, velocityY: CGFloat) {
+                guard terminalPagerLastStep == 0 else { return }
+
+                let verticalDelta = abs(translationY)
+                if verticalDelta >= Self.terminalPagerSwipeThreshold {
+                    handleTerminalPagerTranslation(translationY)
+                    return
+                }
+
+                guard verticalDelta >= Self.terminalPagerFlickMinimumDistance,
+                      abs(velocityY) >= Self.terminalPagerFlickVelocityThreshold else {
+                    return
+                }
+
+                let direction = TerminalPageDirection.forFingerSwipe(translationY: translationY)
+                terminalPagerLastStep = translationY < 0 ? -1 : 1
+                onTerminalPagerScroll(direction)
+            }
+
+            private func handleTerminalPagerTranslation(_ translationY: CGFloat) {
+                let verticalDelta = abs(translationY)
+                guard verticalDelta >= Self.terminalPagerSwipeThreshold else { return }
+
+                let sign = translationY < 0 ? -1 : 1
+                let repeatedDistance = max(0, verticalDelta - Self.terminalPagerSwipeThreshold)
+                let stepMagnitude = 1 + Int(repeatedDistance / Self.terminalPagerRepeatDistance)
+                let currentStep = sign * stepMagnitude
+
+                let eventsToSend: Int
+                if terminalPagerLastStep == 0 || terminalPagerLastStep.signum() != currentStep.signum() {
+                    eventsToSend = stepMagnitude
+                } else {
+                    eventsToSend = max(0, abs(currentStep) - abs(terminalPagerLastStep))
+                }
+
+                guard eventsToSend > 0 else { return }
+
+                terminalPagerLastStep = currentStep
+                let direction = TerminalPageDirection.forFingerSwipe(translationY: translationY)
+                for _ in 0..<min(eventsToSend, Self.maximumPagerEventsPerGestureUpdate) {
+                    onTerminalPagerScroll(direction)
+                }
             }
 
             private func scrollByPage(_ textView: UITextView, direction: CGFloat) {

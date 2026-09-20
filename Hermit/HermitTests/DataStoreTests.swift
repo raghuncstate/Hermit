@@ -329,5 +329,46 @@ struct DataStoreTests {
             username: "raghupathyk",
             privateKeyRef: "iphone-key-ref"
         ))
+
+        let hedgehogAnother = try #require(store.hosts.first { $0.displayName == "Hedgehog Ubuntu24-another" })
+        #expect(hedgehogAnother.hostname == "hedgehog6209.ddns.net")
+        #expect(hedgehogAnother.port == 10122)
+        #expect(hedgehogAnother.username == "raghu")
+        #expect(hedgehogAnother.privateKeyRef == "dev-ssh-key")
+        #expect(hedgehogAnother.defaultTmuxSessionName == "0")
+    }
+
+    @Test func loadMigratesExistingSecondHedgehogVmProfile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HermitDataStoreTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fileURL = directory.appendingPathComponent("hermit-data.json")
+        let oldProfile = Host(
+            displayName: "Ubuntu24 another",
+            hostname: "hedgehog6209.ddns.net",
+            port: 10122,
+            username: "raghu",
+            privateKeyRef: "iphone-key-ref",
+            defaultTmuxSessionName: "work"
+        )
+        let backup = BackupData(
+            version: 1,
+            exportedAt: Date(timeIntervalSince1970: 0),
+            hosts: [oldProfile],
+            sessions: []
+        )
+        try JSONEncoder.hermit.encode(backup).write(to: fileURL)
+
+        let store = DataStore(localFileURL: fileURL, startWatching: false)
+
+        let migrated = try #require(store.hosts.first { $0.displayName == "Hedgehog Ubuntu24-another" })
+        #expect(migrated.id == oldProfile.id)
+        #expect(migrated.hostname == "hedgehog6209.ddns.net")
+        #expect(migrated.port == 10122)
+        #expect(migrated.username == "raghu")
+        #expect(migrated.privateKeyRef == "iphone-key-ref")
+        #expect(migrated.defaultTmuxSessionName == "work")
     }
 }

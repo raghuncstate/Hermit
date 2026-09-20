@@ -30,8 +30,13 @@ actor TmuxControlClient {
     static func connect(host: Host, sessionName: String) async throws -> TmuxControlClient {
         let connection = try await SSHConnectionManager.connectClient(for: host)
         let client = TmuxControlClient(connection: connection)
-        try await client.start(sessionName: sessionName, socketName: host.tmuxSocketName, tmuxCommand: host.tmuxCommand)
-        return client
+        do {
+            try await client.start(sessionName: sessionName, socketName: host.tmuxSocketName, tmuxCommand: host.tmuxCommand)
+            return client
+        } catch {
+            await client.disconnect()
+            throw error
+        }
     }
 
     func start(sessionName: String, socketName: String?, tmuxCommand: String?) async throws {
@@ -104,16 +109,6 @@ actor TmuxControlClient {
 
     private func setWriter(_ writer: TTYStdinWriter) {
         self.writer = writer
-        startContinuation?.resume()
-        startContinuation = nil
-
-        Task {
-            do {
-                _ = try await send("refresh-client -f pause-after=5")
-            } catch {
-                tmuxLogger.debug("Unable to enable tmux flow control: \(error.localizedDescription)")
-            }
-        }
     }
 
     private func receive(_ data: Data) {
@@ -128,6 +123,23 @@ actor TmuxControlClient {
             guard !waitingForBegin.isEmpty else { return }
             pendingCommands[commandNumber] = waitingForBegin.removeFirst()
         case .commandFinished(let block):
+            // tmux emits an initial attach block before replies to client commands.
+            if let continuation = startContinuation {
+                startContinuation = nil
+                if block.isError {
+                    continuation.resume(throwing: TmuxProtocolError.commandFailed(block.output))
+                } else {
+                    continuation.resume()
+                    Task {
+                        do {
+                            _ = try await send("refresh-client -f pause-after=5")
+                        } catch {
+                            tmuxLogger.debug("Unable to enable tmux flow control: \(error.localizedDescription)")
+                        }
+                    }
+                }
+                return
+            }
             guard let continuation = pendingCommands.removeValue(forKey: block.commandNumber) else {
                 return
             }

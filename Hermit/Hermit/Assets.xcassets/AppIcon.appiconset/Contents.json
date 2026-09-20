@@ -1,13 +1,13 @@
 {
   "images" : [
     {
-      "filename" : "appicon-40@2x.png",
+      "filename" : "appicon-20@2x.png",
       "idiom" : "iphone",
       "scale" : "2x",
       "size" : "20x20"
     },
     {
-      "filename" : "appicon-40@3x.png",
+      "filename" : "appicon-20@3x.png",
       "idiom" : "iphone",
       "scale" : "3x",
       "size" : "20x20"

@@ -14,6 +14,7 @@ let package = Package(
             name: "HermitCoreValidationRunner",
             path: ".",
             exclude: [
+                "build",
                 "Gemfile",
                 "Gemfile.lock",
                 "Hermit/App",

@@ -15,6 +15,7 @@ final class DataStore {
     private static let newMacReverseTunnelHostID = UUID(uuidString: "E7B5A8E8-80F5-4D6E-8823-A902586E57FF")!
     private static let obsoleteVPNMacHostID = UUID(uuidString: "83540C4C-2633-4C44-936C-EED9AE6F7EDB")!
     private static let hedgehogHostID = UUID(uuidString: "7D4C3575-55A4-46ED-B543-B7B1D40B0E14")!
+    private static let hedgehogAnotherHostID = UUID(uuidString: "1E93BF82-7DB8-4567-AEFA-1FC19D818A38")!
     private static let reverseTunnelMacTmuxSocketName: String? = nil
     private static let reverseTunnelMacSessionName = "0"
     private static let newMacReverseTunnelSessionName = "0"
@@ -104,8 +105,9 @@ final class DataStore {
                 shortcuts: backup.tmuxShortcuts
             )
             let hedgehogMigration = migrateHedgehogProfile(hosts: profileMigration.hosts)
+            let hedgehogAnotherMigration = migrateHedgehogAnotherProfile(hosts: hedgehogMigration.hosts)
             let newMacMigration = migrateNewMacReverseTunnelProfile(
-                hosts: hedgehogMigration.hosts,
+                hosts: hedgehogAnotherMigration.hosts,
                 sessions: profileMigration.sessions,
                 shortcuts: profileMigration.shortcuts
             )
@@ -124,6 +126,7 @@ final class DataStore {
             if hostsDidChange ||
                 profileMigration.didChange ||
                 hedgehogMigration.didChange ||
+                hedgehogAnotherMigration.didChange ||
                 newMacMigration.didChange ||
                 filteredShortcuts.count != newMacMigration.shortcuts.count {
                 save()
@@ -395,6 +398,9 @@ final class DataStore {
         if isKnownHedgehogProfile(host) {
             host = hedgehogHost(from: host)
         }
+        if isKnownHedgehogAnotherProfile(host) {
+            host = hedgehogAnotherHost(from: host)
+        }
         // Always sync ribbon configs to current defaults
         // During active development, this ensures all hosts pick up button changes
         host.ribbonConfigs = RibbonConfig.presets
@@ -406,6 +412,22 @@ final class DataStore {
         var migratedHosts = hosts
 
         if let index = migratedHosts.firstIndex(where: isKnownHedgehogProfile) {
+            if !isSameHedgehogHost(migratedHosts[index], canonicalHost) {
+                migratedHosts[index] = canonicalHost
+                return (migratedHosts, true)
+            }
+            return (migratedHosts, false)
+        }
+
+        migratedHosts.append(canonicalHost)
+        return (migratedHosts, true)
+    }
+
+    private func migrateHedgehogAnotherProfile(hosts: [Host]) -> (hosts: [Host], didChange: Bool) {
+        let canonicalHost = hedgehogAnotherHost(from: hosts.first(where: isKnownHedgehogAnotherProfile))
+        var migratedHosts = hosts
+
+        if let index = migratedHosts.firstIndex(where: isKnownHedgehogAnotherProfile) {
             if !isSameHedgehogHost(migratedHosts[index], canonicalHost) {
                 migratedHosts[index] = canonicalHost
                 return (migratedHosts, true)
@@ -596,6 +618,16 @@ final class DataStore {
             host.displayName.localizedCaseInsensitiveCompare("Hedgehog") == .orderedSame
     }
 
+    private func isKnownHedgehogAnotherProfile(_ host: Host) -> Bool {
+        host.id == Self.hedgehogAnotherHostID ||
+            (
+                host.username == "raghu" &&
+                host.hostname == "hedgehog6209.ddns.net" &&
+                host.port == 10122
+            ) ||
+            host.displayName.localizedCaseInsensitiveCompare("Hedgehog Ubuntu24-another") == .orderedSame
+    }
+
     private func isObsoleteShortcut(_ shortcut: TmuxShortcut, raghudtHostIDs: Set<UUID>) -> Bool {
         if raghudtHostIDs.contains(shortcut.hostID), shortcut.sessionName == "mobile" {
             return true
@@ -679,8 +711,33 @@ final class DataStore {
                     localPort: 3000,
                     remoteHost: "127.0.0.1",
                     remotePort: 3000
+                ),
+                LocalPortForward(
+                    localHost: "127.0.0.1",
+                    localPort: 6901,
+                    remoteHost: "127.0.0.1",
+                    remotePort: 6901
                 )
             ],
+            defaultTmuxSessionName: sourceHost?.defaultTmuxSessionName ?? "0",
+            tmuxSocketName: sourceHost?.tmuxSocketName,
+            tmuxCommand: sourceHost?.tmuxCommand,
+            ribbonConfigs: sourceHost?.ribbonConfigs ?? RibbonConfig.presets,
+            createdAt: sourceHost?.createdAt ?? Date()
+        )
+    }
+
+    private func hedgehogAnotherHost(from sourceHost: Host? = nil) -> Host {
+        let sourcePrivateKeyRef = sourceHost?.privateKeyRef.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let privateKeyRef = sourcePrivateKeyRef.isEmpty ? "dev-ssh-key" : sourcePrivateKeyRef
+
+        return Host(
+            id: sourceHost?.id ?? Self.hedgehogAnotherHostID,
+            displayName: "Hedgehog Ubuntu24-another",
+            hostname: "hedgehog6209.ddns.net",
+            port: 10122,
+            username: "raghu",
+            privateKeyRef: privateKeyRef,
             defaultTmuxSessionName: sourceHost?.defaultTmuxSessionName ?? "0",
             tmuxSocketName: sourceHost?.tmuxSocketName,
             tmuxCommand: sourceHost?.tmuxCommand,
@@ -721,8 +778,9 @@ final class DataStore {
         guard iCloudURL == nil else { return }
         if !FileManager.default.fileExists(atPath: localFileURL.path) {
             let hedgehogMigration = migrateHedgehogProfile(hosts: hosts)
+            let hedgehogAnotherMigration = migrateHedgehogAnotherProfile(hosts: hedgehogMigration.hosts)
             let newMacMigration = migrateNewMacReverseTunnelProfile(
-                hosts: hedgehogMigration.hosts,
+                hosts: hedgehogAnotherMigration.hosts,
                 sessions: sessions,
                 shortcuts: tmuxShortcuts
             )
@@ -762,7 +820,8 @@ final class DataStore {
             port: Int(environment["HERMIT_SIM_PORT"] ?? "22") ?? 22,
             username: environment["HERMIT_SIM_USER"] ?? NSUserName(),
             privateKeyRef: keyRef,
-            defaultTmuxSessionName: environment["HERMIT_SIM_TMUX_SESSION"] ?? "0"
+            defaultTmuxSessionName: environment["HERMIT_SIM_TMUX_SESSION"] ?? "0",
+            tmuxSocketName: environment["HERMIT_SIM_TMUX_SOCKET"]
         )
 
         if let index = hosts.firstIndex(where: { $0.id == hostID }) {

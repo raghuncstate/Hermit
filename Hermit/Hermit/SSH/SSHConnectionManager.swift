@@ -362,6 +362,22 @@ final class SSHConnectionManager {
         }
     }
 
+    static func executeCommand(_ command: String, on host: Host, maxResponseSize: Int = 1024 * 1024) async throws -> String {
+        var commandHost = host
+        commandHost.localPortForwards = []
+        let connection = try await connectClient(for: commandHost)
+        defer {
+            Task { await connection.close() }
+        }
+
+        var output = try await connection.client.executeCommand(
+            command,
+            maxResponseSize: maxResponseSize,
+            mergeStreams: true
+        )
+        return output.readString(length: output.readableBytes) ?? ""
+    }
+
     private static func startLocalPortForwards(
         _ forwards: [LocalPortForward],
         using sshClient: SSHClient

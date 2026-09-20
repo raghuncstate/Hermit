@@ -473,6 +473,54 @@ final class TmuxWorkspaceModel {
         }
     }
 
+    func openKasmHelperWindow() async -> (session: TmuxSession, window: TmuxWindow)? {
+        do {
+            await connectIfNeeded()
+            await refreshSessions()
+
+            guard let session = sessions.first(where: { $0.name == host.defaultTmuxSessionName }) ?? sessions.first else {
+                throw TmuxProtocolError.commandFailed("No tmux session is available.")
+            }
+
+            let script = """
+            source ~/.bashrc
+            clear
+            printf 'Hermit Kasm helper\\n\\n'
+            kasm start
+            printf '\\nPassword:\\n'
+            kasm password
+            printf '\\n\\nUseful commands:\\n'
+            printf '  kasm --help\\n'
+            printf '  kasm status\\n'
+            printf '  kasm password\\n'
+            printf '  kasm client\\n\\n'
+            exec bash -l
+            """
+            let command = "bash -lc \(TmuxCommandQuoter.quote(script))"
+
+            let createdWindow = try await withConnectedClient { client in
+                try await client.newWindow(sessionId: session.id, name: "kasm", command: command, detached: true)
+            }
+            guard let createdWindow else {
+                throw TmuxProtocolError.commandFailed("tmux did not return the created Kasm window.")
+            }
+
+            await refreshWindows(for: session)
+            let window = windows(for: session).first { $0.id == createdWindow.id } ?? createdWindow
+            if windowsBySession[session.id]?.contains(where: { $0.id == window.id }) != true {
+                var windows = windowsBySession[session.id] ?? []
+                windows.append(window)
+                windowsBySession[session.id] = windows.sorted { $0.index < $1.index }
+            }
+
+            await loadWindow(window)
+            return (session, window)
+        } catch {
+            handle(error)
+            return nil
+        }
+    }
+
     func renameWindow(_ window: TmuxWindow, to name: String, in session: TmuxSession) async {
         guard !name.isEmpty else { return }
         do {
@@ -691,15 +739,22 @@ final class TmuxWorkspaceModel {
     private func withConnectedClient<T>(
         _ operation: (TmuxControlClient) async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         guard let currentClient = await connectedClient() else {
             throw TmuxProtocolError.disconnected
         }
+        let generation = connectionGeneration
 
         do {
             let result = try await operation(currentClient)
+            try Task.checkCancellation()
+            guard isCurrentConnectionGeneration(generation) else { throw CancellationError() }
             errorMessage = nil
             return result
         } catch {
+            // A closing connection must not invalidate or reopen its replacement.
+            try Task.checkCancellation()
+            guard isCurrentConnectionGeneration(generation) else { throw CancellationError() }
             guard shouldReconnect(after: error) else {
                 throw error
             }
@@ -708,12 +763,17 @@ final class TmuxWorkspaceModel {
             guard let retryClient = await connectedClient() else {
                 throw error
             }
+            let retryGeneration = connectionGeneration
 
             do {
                 let result = try await operation(retryClient)
+                try Task.checkCancellation()
+                guard isCurrentConnectionGeneration(retryGeneration) else { throw CancellationError() }
                 errorMessage = nil
                 return result
             } catch {
+                try Task.checkCancellation()
+                guard isCurrentConnectionGeneration(retryGeneration) else { throw CancellationError() }
                 if shouldReconnect(after: error) {
                     markConnectionDropped(error)
                 }
@@ -871,6 +931,7 @@ final class TmuxWorkspaceModel {
     }
 
     private func handle(_ error: Error) {
+        guard !(error is CancellationError) else { return }
         errorMessage = error.localizedDescription
         if shouldReconnect(after: error) {
             markConnectionDropped(error)
@@ -880,6 +941,7 @@ final class TmuxWorkspaceModel {
     }
 
     private func shouldReconnect(after error: Error) -> Bool {
+        if error is CancellationError { return false }
         if let tmuxError = error as? TmuxProtocolError {
             switch tmuxError {
             case .disconnected:

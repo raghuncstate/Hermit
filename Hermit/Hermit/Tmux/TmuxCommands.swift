@@ -61,18 +61,7 @@ extension TmuxControlClient {
     func listWindows(sessionId: String) async throws -> [TmuxWindow] {
         let target = TmuxCommandQuoter.quote(sessionId)
         let output = try await send("list-windows -t \(target) -F '#{window_id}|#{window_index}|#{window_name}|#{window_active}|#{window_layout}'")
-        return output.nonEmptyLines.compactMap { line in
-            let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            guard fields.count >= 5 else { return nil }
-            return TmuxWindow(
-                id: fields[0],
-                sessionId: sessionId,
-                index: Int(fields[1]) ?? 0,
-                name: fields[2],
-                isActive: fields[3] == "1",
-                layout: fields[4]
-            )
-        }
+        return output.nonEmptyLines.compactMap { parseWindowLine($0, sessionId: sessionId) }
     }
 
     func listPanes(windowId: String) async throws -> [TmuxPane] {
@@ -111,9 +100,33 @@ extension TmuxControlClient {
         _ = try await send("select-window -t \(target)")
     }
 
-    func newWindow(sessionId: String) async throws {
+    func newWindow(
+        sessionId: String,
+        name: String? = nil,
+        command: String? = nil,
+        detached: Bool = false
+    ) async throws -> TmuxWindow? {
         let target = TmuxCommandQuoter.quote("\(sessionId):")
-        _ = try await send("new-window -t \(target)")
+        var parts = [
+            "new-window",
+            "-P",
+            "-F",
+            TmuxCommandQuoter.quote("#{window_id}|#{window_index}|#{window_name}|#{window_active}|#{window_layout}")
+        ]
+        if detached {
+            parts.append("-d")
+        }
+        parts.append("-t")
+        parts.append(target)
+        if let name, !name.isEmpty {
+            parts.append("-n")
+            parts.append(TmuxCommandQuoter.quote(name))
+        }
+        if let command, !command.isEmpty {
+            parts.append(TmuxCommandQuoter.quote(command))
+        }
+        let output = try await send(parts.joined(separator: " "))
+        return output.nonEmptyLines.compactMap { parseWindowLine($0, sessionId: sessionId) }.first
     }
 
     func newSession(named name: String) async throws {
@@ -193,6 +206,19 @@ extension TmuxControlClient {
         let target = TmuxCommandQuoter.quote(paneId)
         _ = try await send("send-keys -N \(count) -t \(target) BSpace")
     }
+}
+
+private func parseWindowLine(_ line: String, sessionId: String) -> TmuxWindow? {
+    let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count >= 5 else { return nil }
+    return TmuxWindow(
+        id: fields[0],
+        sessionId: sessionId,
+        index: Int(fields[1]) ?? 0,
+        name: fields[2],
+        isActive: fields[3] == "1",
+        layout: fields[4]
+    )
 }
 
 private extension String {

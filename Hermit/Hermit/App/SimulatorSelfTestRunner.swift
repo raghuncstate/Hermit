@@ -20,12 +20,20 @@ enum SimulatorSelfTestRunner {
             "requestedWindows": windowNames
         ]
 
-        guard let host = dataStore.hosts.first(where: { $0.displayName == hostName }) else {
+        guard var host = dataStore.hosts.first(where: { $0.displayName == hostName }) else {
             report["success"] = false
             report["error"] = "host not found"
             write(report)
             return
         }
+
+        if environment["HERMIT_SIM_SELFTEST_JUMP"] == "1" {
+            host.jumpHost = SSHJumpHost(
+                hostname: host.hostname, port: host.port,
+                username: host.username, privateKeyRef: host.privateKeyRef
+            )
+        }
+        report["jumpHost"] = host.jumpHost != nil
 
         let model = TmuxWorkspaceModel(host: host)
         await model.connectIfNeeded()
@@ -81,8 +89,60 @@ enum SimulatorSelfTestRunner {
             ])
         }
 
+        let reconnectCycles = min(100, max(0, Int(environment["HERMIT_SIM_RECONNECT_CYCLES"] ?? "0") ?? 0))
+        var reconnectResults: [[String: Any]] = []
+        for cycle in 0..<reconnectCycles {
+            await model.reconnect()
+            guard model.status == .connected,
+                  let currentSession = model.sessions.first(where: { $0.id == session.id }) else {
+                success = false
+                reconnectResults.append([
+                    "cycle": cycle + 1, "success": false, "error": "reconnect failed",
+                    "status": String(describing: model.status), "detail": model.errorMessage ?? "",
+                    "sessionIDs": model.sessions.map(\.id)
+                ])
+                break
+            }
+            await model.refreshWindows(for: currentSession)
+            guard let window = model.windows(for: currentSession).first(where: { windowNames.contains($0.name) }) else {
+                success = false
+                reconnectResults.append(["cycle": cycle + 1, "success": false, "error": "window missing after reconnect"])
+                break
+            }
+            await model.selectWindow(window, in: currentSession)
+            guard let pane = model.activePane(for: window) ?? model.panes(for: window).first else {
+                success = false
+                reconnectResults.append(["cycle": cycle + 1, "success": false, "error": "pane missing after reconnect"])
+                break
+            }
+            model.setFollow(pane.id, enabled: true)
+            await model.captureLive(pane)
+            let firstFrame = model.snapshotsByPane[pane.id]?.rawText ?? ""
+            try? await Task.sleep(for: .milliseconds(300))
+            await model.captureLive(pane)
+            let lastFrame = model.snapshotsByPane[pane.id]?.rawText ?? ""
+            let isStreaming = !lastFrame.isEmpty && firstFrame != lastFrame
+
+            // Close with a history read in flight, as when a busy terminal is backgrounded.
+            let pendingRead = Task { await model.captureScrollback(pane) }
+            try? await Task.sleep(for: .milliseconds(cycle % 5 + 1))
+            await model.disconnect()
+            await pendingRead.value
+            let disconnected = model.status == .disconnected
+            let passed = isStreaming && disconnected
+            success = success && passed
+            reconnectResults.append([
+                "cycle": cycle + 1, "streaming": isStreaming,
+                "disconnected": disconnected, "success": passed
+            ])
+            report["completedReconnectCycles"] = cycle + 1
+            report["reconnectResults"] = reconnectResults
+            write(report)
+        }
+
         report["success"] = success
         report["results"] = results
+        report["reconnectResults"] = reconnectResults
         write(report)
         await model.disconnect()
     }
