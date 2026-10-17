@@ -7,6 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D20000000000000000000006 = {isa = PBXBuildFile; fileRef = D21000000000000000000006; };
+		D20000000000000000000007 = {isa = PBXBuildFile; fileRef = D21000000000000000000007; };
+		D20000000000000000000001 /* AgentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000001; };
+		D20000000000000000000002 /* AgentBridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000002; };
+		D20000000000000000000003 /* AgentChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000003; };
+		D20000000000000000000004 /* AgentVoiceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000004; };
+		D20000000000000000000005 /* AgentMessagingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000005; };
 		060D09095CE3EE208B25B4DC /* SSHConnectionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1046FBE859BC4B08201D8384 /* SSHConnectionManager.swift */; };
 		0BA5599BA8F6C23C17709334 /* Host.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B9A81459F91BA29B484041 /* Host.swift */; };
 		1A3452C0EDC26F073FA821D8 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8355DD80EFA5F9636D1EC3C /* TerminalView.swift */; };
@@ -59,6 +66,14 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D21000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessagingTests.swift; sourceTree = "<group>"; };
+		D21000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessagingUITests.swift; sourceTree = "<group>"; };
+		D21000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HermitUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D21000000000000000000001 /* AgentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentModels.swift; sourceTree = "<group>"; };
+		D21000000000000000000002 /* AgentBridgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentBridgeClient.swift; sourceTree = "<group>"; };
+		D21000000000000000000003 /* AgentChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentChatStore.swift; sourceTree = "<group>"; };
+		D21000000000000000000004 /* AgentVoiceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentVoiceController.swift; sourceTree = "<group>"; };
+		D21000000000000000000005 /* AgentMessagingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessagingViews.swift; sourceTree = "<group>"; };
 		009563950D464DFEFC18EBED /* HermitTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HermitTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0096DDB5D5C93DB7732319BF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0A68B9D5B1DCF7CFA46CF132 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
@@ -122,9 +137,17 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		D22000000000000000000002 = {isa = PBXGroup; children = (D21000000000000000000007); path = HermitUITests; sourceTree = "<group>"; };
+		D22000000000000000000001 /* Messaging */ = {
+			isa = PBXGroup;
+			children = (D21000000000000000000001, D21000000000000000000002, D21000000000000000000003, D21000000000000000000004, D21000000000000000000005);
+			path = Messaging;
+			sourceTree = "<group>";
+		};
 		1053437449B7D33F1E8ACD5E /* HermitTests */ = {
 			isa = PBXGroup;
 			children = (
+				D21000000000000000000006,
 				281571BEA9FA0A063ED80B4A /* ModelTests.swift */,
 				92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */,
 				B93D8483C507AE268486180F /* DataStoreTests.swift */,
@@ -139,6 +162,7 @@
 		289D96B1C25E9A61134D7A5B /* Hermit */ = {
 			isa = PBXGroup;
 			children = (
+				D22000000000000000000001 /* Messaging */,
 				FE910D29D648D8F2EA669AEF /* App */,
 				9CF43B31E8845D861542A38E /* Models */,
 				F26201C1E65404DE8245CC9E /* Storage */,
@@ -173,6 +197,7 @@
 		7882D14E196057770B59E53D = {
 			isa = PBXGroup;
 			children = (
+				D22000000000000000000002,
 				289D96B1C25E9A61134D7A5B /* Hermit */,
 				1053437449B7D33F1E8ACD5E /* HermitTests */,
 				BF7A2D27A78D590BDEF15AF2 /* Products */,
@@ -193,6 +218,7 @@
 		BF7A2D27A78D590BDEF15AF2 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				D21000000000000000000008,
 				CE29BE284D8E7CDFA377A125 /* Hermit.app */,
 				009563950D464DFEFC18EBED /* HermitTests.xctest */,
 			);
@@ -269,6 +295,17 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		D23000000000000000000001 /* HermitUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D24000000000000000000001;
+			buildPhases = (D25000000000000000000001);
+			buildRules = ();
+			dependencies = (EE543492886B1A944A594DA2);
+			name = HermitUITests;
+			productName = HermitUITests;
+			productReference = D21000000000000000000008;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		6439CF22188FA14BBD363342 /* Hermit */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = E850913E5F419DF1836B1B18 /* Build configuration list for PBXNativeTarget "Hermit" */;
@@ -331,6 +368,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				D23000000000000000000001,
 				6439CF22188FA14BBD363342 /* Hermit */,
 				BA128F9D3C0D15FFB32AEEA8 /* HermitTests */,
 			);
@@ -349,10 +387,12 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		D25000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D20000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
 		6E010B3D85AA514D3FB28B7F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D20000000000000000000006,
 				9338B8421E2ADFC2C45471BD /* ModelTests.swift in Sources */,
 				DFCF0B3F36E792A3642C085B /* RibbonConfigTests.swift in Sources */,
 				698EC92E23FFC9F980449B63 /* DataStoreTests.swift in Sources */,
@@ -367,6 +407,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D20000000000000000000001,
+				D20000000000000000000002,
+				D20000000000000000000003,
+				D20000000000000000000004,
+				D20000000000000000000005,
 				549209BD9A061593509D3A28 /* HermitApp.swift in Sources */,
 				70D0F61B4D9340F4B1918E71 /* SimulatorSelfTestRunner.swift in Sources */,
 				0BA5599BA8F6C23C17709334 /* Host.swift in Sources */,
@@ -411,6 +456,8 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		D26000000000000000000001 = {isa = XCBuildConfiguration; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.hermit.HermitUITests; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = 1; TEST_TARGET_NAME = Hermit; }; name = Debug; };
+		D26000000000000000000002 = {isa = XCBuildConfiguration; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.hermit.HermitUITests; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = 1; TEST_TARGET_NAME = Hermit; }; name = Release; };
 		0472651C93A265996FEFE4D2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -491,11 +538,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Hermit/HermitDev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2026092001;
+				CURRENT_PROJECT_VERSION = 2026101701;
 				DEVELOPMENT_TEAM = XY6CJ6B92K;
 				INFOPLIST_FILE = Hermit/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = " @executable_path/Frameworks";
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.raghupathy.hermit.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -510,11 +557,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Hermit/HermitDev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2026092001;
+				CURRENT_PROJECT_VERSION = 2026101701;
 				DEVELOPMENT_TEAM = XY6CJ6B92K;
 				INFOPLIST_FILE = Hermit/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = " @executable_path/Frameworks";
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.raghupathy.hermit.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -578,6 +625,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		D24000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (D26000000000000000000001, D26000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		48EA9C817F74F26250070E59 /* Build configuration list for PBXNativeTarget "HermitTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

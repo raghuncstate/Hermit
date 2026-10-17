@@ -36,9 +36,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Hermit uses the microphone to dictate terminal input before sending it to the selected tmux pane.</string>
+	<string>Hermit uses the microphone when you start dictation or voice conversation with a selected agent.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Hermit uses speech recognition to transcribe dictated terminal input.</string>
+	<string>Hermit transcribes speech for terminal dictation and agent conversations.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

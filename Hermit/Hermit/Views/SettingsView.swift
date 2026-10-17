@@ -5,10 +5,18 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings = AppSettings.load()
     @State private var showingAbout = false
+    @AppStorage("agentMessagingEnabled") private var agentMessagingEnabled = false
+    @AppStorage("agentVoiceQuietSeconds") private var agentVoiceQuietSeconds = 2.5
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Messages") {
+                    Toggle("Agent messaging", isOn: $agentMessagingEnabled)
+                    if agentMessagingEnabled {
+                        Stepper("Voice pause: \(agentVoiceQuietSeconds, specifier: "%.1f") seconds", value: $agentVoiceQuietSeconds, in: 1.5...5, step: 0.5)
+                    }
+                }
                 Section("Voice Provider") {
                     Picker("Provider", selection: $settings.voiceProvider) {
                         Text("None").tag(VoiceProvider.none)

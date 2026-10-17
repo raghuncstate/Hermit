@@ -27,9 +27,15 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
+      shouldUseLaunchSchemeArgsEnv = "NO"
       shouldAutocreateTestPlan = "YES">
+      <EnvironmentVariables>
+         <EnvironmentVariable key = "HERMIT_AGENT_TEST_CONFIG" value = "" isEnabled = "YES"/>
+      </EnvironmentVariables>
       <Testables>
+         <TestableReference skipped = "NO">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "D23000000000000000000001" BuildableName = "HermitUITests.xctest" BlueprintName = "HermitUITests" ReferencedContainer = "container:Hermit.xcodeproj"/>
+         </TestableReference>
          <TestableReference
             skipped = "NO">
             <BuildableReference

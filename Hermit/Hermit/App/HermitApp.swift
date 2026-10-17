@@ -23,11 +23,11 @@ struct HermitApp: App {
     @State private var dataStore = DataStore()
     @State private var navigator = AppNavigator()
     @State private var voiceCoordinator = VoiceInputCoordinator()
-    @State private var showingAbout = !AboutView.hasSeenAbout
+    @State private var showingAbout = !AboutView.hasSeenAbout && !AgentChatStore.demoRequested
 
     var body: some Scene {
         WindowGroup {
-            SessionListView()
+            HermitRootView()
                 .environment(dataStore)
                 .environment(navigator)
                 .environment(voiceCoordinator)
