@@ -85,6 +85,7 @@ struct WindowDetailView: View {
     var initialPaneIndex: Int?
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(VoiceInputCoordinator.self) private var voiceCoordinator
     @Environment(DataStore.self) private var dataStore
     @Environment(AppNavigator.self) private var navigator
@@ -92,6 +93,7 @@ struct WindowDetailView: View {
     @State private var selectedWindowId: String?
     @State private var selectedSessionId: String?
     @State private var commandText = ""
+    @FocusState private var commandFocused: Bool
     @State private var streamedInputText = ""
     @State private var suppressInputChange = false
     @State private var commandIdleSubmitTask: Task<Void, Never>?
@@ -106,7 +108,12 @@ struct WindowDetailView: View {
     @State private var killRequest: KillRequest?
     @State private var scrollRequest = PaneScrollRequest(action: .bottom, token: 0)
     @State private var terminalViewportWidth: CGFloat = 0
+    @State private var terminalViewportHeight: CGFloat = 0
     @State private var activationRefreshTask: Task<Void, Never>?
+    @State private var activationRequestID: UUID?
+    @State private var isRestoringTerminal = false
+    @State private var showingInputError = false
+    @State private var selectionUnavailable = false
     @AppStorage("hermit.windowTerminalInteractionModes.v1") private var terminalInteractionModesJSON = "{}"
 
     private var allKnownWindows: [TmuxWindow] {
@@ -137,6 +144,7 @@ struct WindowDetailView: View {
     }
 
     private var selectedPane: TmuxPane? {
+        guard !selectionUnavailable else { return nil }
         if let selectedPaneId {
             return panes.first { $0.id == selectedPaneId }
         }
@@ -145,6 +153,10 @@ struct WindowDetailView: View {
 
     private var liveRefreshID: String {
         follow ? "live-\(selectedPane?.id ?? "none")" : "paused"
+    }
+
+    private var canSendTerminalInput: Bool {
+        scenePhase == .active && !isRestoringTerminal && model.canSendInput && selectedPane != nil
     }
 
     private var shortcutSwitcherFavoriteLimit: Int {
@@ -188,6 +200,7 @@ struct WindowDetailView: View {
         .animation(.easeInOut(duration: 0.18), value: showingWindowSwitcher)
         .navigationTitle(currentWindow.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(verticalSizeClass == .compact && commandFocused ? .hidden : .visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
@@ -226,6 +239,7 @@ struct WindowDetailView: View {
             let loadedPanes = model.panes(for: currentWindow)
             let preferredPane = preferredInitialPane(in: loadedPanes) ?? model.activePane(for: currentWindow)
             selectedPaneId = preferredPane?.id
+            selectionUnavailable = preferredPane == nil
             recordVisit(window: currentWindow, session: currentSession)
             if let preferredPane {
                 recordVisit(pane: preferredPane, in: currentWindow, session: currentSession)
@@ -244,6 +258,8 @@ struct WindowDetailView: View {
         }
         .onChange(of: selectedPane?.id) { _, _ in
             keyModifiers.shift = false
+            commandIdleSubmitTask?.cancel()
+            resetLocalCommandBox()
         }
         .onDisappear {
             keyModifiers.shift = false
@@ -256,6 +272,16 @@ struct WindowDetailView: View {
                     sendCommandText(finalText, to: pane)
                 }
             }
+        }
+        .alert("Input Not Confirmed", isPresented: $showingInputError) {
+            Button("Copy Local Draft") { UIPasteboard.general.string = commandText }
+            Button("Clear Local Draft and Continue") {
+                resetLocalCommandBox()
+                model.acknowledgeInputError()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(model.inputErrorMessage ?? "Check the remote prompt before continuing.")
         }
         .onChange(of: voiceCoordinator.isShowingVoiceModal) { _, show in
             if show {
@@ -287,7 +313,9 @@ struct WindowDetailView: View {
 
     private var terminalWorkspace: some View {
         VStack(spacing: 0) {
-            paneToolbar
+            if verticalSizeClass != .compact || !commandFocused {
+                paneToolbar
+            }
             Divider()
 
             paneContent
@@ -304,8 +332,40 @@ struct WindowDetailView: View {
 
             Divider()
 
-            macroRibbon
-            inputBar
+            if verticalSizeClass != .compact { macroRibbon }
+            if model.inputErrorMessage != nil {
+                Button {
+                    showingInputError = true
+                } label: {
+                    Label("Input not confirmed", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                }
+                .accessibilityIdentifier("tmux-input-error")
+            } else if isRestoringTerminal || model.status == .connecting {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Reconnecting...").font(.caption)
+                }
+                .accessibilityIdentifier("tmux-reconnecting")
+            } else if model.status != .connected {
+                Button {
+                    activationRefreshTask?.cancel()
+                    activationRefreshTask = Task { await restoreTerminalAfterActivation(forceFollow: true) }
+                } label: {
+                    Label("Reconnect", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .accessibilityIdentifier("tmux-reconnect")
+            }
+            if verticalSizeClass == .compact {
+                HStack(spacing: 0) {
+                    macroRibbon
+                        .frame(width: max(230, min(380, terminalViewportWidth * 0.45)))
+                    inputBar
+                }
+            } else {
+                inputBar
+            }
         }
     }
 
@@ -419,6 +479,7 @@ struct WindowDetailView: View {
         let isSelected = pane.id == selectedPane?.id
 
         return Button {
+            selectionUnavailable = false
             selectedPaneId = pane.id
             model.setFollow(pane.id, enabled: follow)
             recordVisit(pane: pane, in: currentWindow, session: currentSession)
@@ -518,11 +579,16 @@ struct WindowDetailView: View {
             .background(Color(uiColor: .systemBackground))
             .onAppear {
                 terminalViewportWidth = geometry.size.width
+                terminalViewportHeight = geometry.size.height
             }
             .onChange(of: geometry.size.width) { _, newWidth in
                 terminalViewportWidth = newWidth
             }
-            .task(id: "\(pane.id)-\(targetColumns)x\(targetRows)") {
+            .onChange(of: geometry.size.height) { _, newHeight in
+                terminalViewportHeight = newHeight
+            }
+            .task(id: "\(pane.id)-\(targetColumns)x\(targetRows)-\(model.connectionGeneration)-\(isRestoringTerminal)-\(model.status)") {
+                guard !isRestoringTerminal, model.status == .connected, scenePhase == .active else { return }
                 await model.resizeForDisplay(pane, cols: targetColumns, rows: targetRows, in: currentWindow)
             }
         }
@@ -739,12 +805,28 @@ struct WindowDetailView: View {
             }
             .toggleStyle(.button)
             .buttonBorderShape(.roundedRectangle)
-            .disabled(selectedPane == nil)
+            .disabled(!canSendTerminalInput)
             .accessibilityLabel("Shift")
             .accessibilityValue(keyModifiers.shift ? "On for next key" : "Off")
             .accessibilityIdentifier("tmux-shift")
             .help("Shift for next Tab or arrow")
             .padding(.leading)
+
+            Button {
+                sendMacro(TmuxMacro(label: "Shift Left", key: "S-Left"))
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "shift")
+                    Image(systemName: "arrow.left")
+                }
+                .frame(width: 44, height: 38)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle)
+            .disabled(!canSendTerminalInput)
+            .accessibilityLabel("Shift Left")
+            .accessibilityIdentifier("tmux-key-S-Left")
+            .help("Shift+Left")
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .center, spacing: 8) {
@@ -768,6 +850,7 @@ struct WindowDetailView: View {
                         .accessibilityLabel(keyModifiers.resolve(macro).label)
                         .accessibilityIdentifier("tmux-key-\(macro.key)")
                         .help(keyModifiers.resolve(macro).label)
+                        .disabled(!canSendTerminalInput)
                     }
                 }
                 .padding(.trailing)
@@ -780,7 +863,16 @@ struct WindowDetailView: View {
 
     private var inputBar: some View {
         HStack(spacing: 8) {
+            if verticalSizeClass == .compact && commandFocused {
+                Button { commandFocused = false } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .frame(width: 22, height: 36)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("Hide Keyboard")
+            }
             TextField("Command", text: $commandText)
+                .focused($commandFocused)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
@@ -788,7 +880,11 @@ struct WindowDetailView: View {
                 .onChange(of: commandText) { _, newValue in
                     handleCommandTextChange(to: newValue)
                 }
-                .onSubmit(sendEnter)
+                .onSubmit {
+                    sendEnter()
+                    DispatchQueue.main.async { commandFocused = true }
+                }
+                .accessibilityIdentifier("tmux-command")
 
             Button {
                 clearCommandBox()
@@ -797,7 +893,7 @@ struct WindowDetailView: View {
                     .frame(width: 34, height: 36)
             }
             .buttonStyle(.bordered)
-            .disabled(commandText.isEmpty && streamedInputText.isEmpty)
+            .disabled(!canSendTerminalInput || (commandText.isEmpty && streamedInputText.isEmpty))
             .accessibilityLabel("Clear Command")
 
             Button {
@@ -809,6 +905,7 @@ struct WindowDetailView: View {
             }
             .buttonStyle(.bordered)
             .accessibilityLabel("Voice Input")
+            .disabled(!canSendTerminalInput)
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -828,7 +925,7 @@ struct WindowDetailView: View {
         }
 
         let delta = streamInputChange(to: newValue)
-        if shouldScheduleCommandIdleSubmit(delta: delta, command: newValue) {
+        if canSendTerminalInput && shouldScheduleCommandIdleSubmit(delta: delta, command: newValue) {
             scheduleCommandIdleSubmit(for: newValue)
         } else if newValue.isEmpty {
             commandIdleSubmitTask?.cancel()
@@ -838,25 +935,22 @@ struct WindowDetailView: View {
     @discardableResult
     private func streamInputChange(to newValue: String) -> (backspaceCount: Int, insertedText: String) {
         guard !suppressInputChange else { return (0, "") }
-        guard let pane = selectedPane else {
-            let delta = inputDelta(from: streamedInputText, to: newValue)
-            streamedInputText = newValue
-            return delta
-        }
-
         let delta = inputDelta(from: streamedInputText, to: newValue)
+        guard canSendTerminalInput, let pane = selectedPane else { return delta }
         guard delta.backspaceCount > 0 || !delta.insertedText.isEmpty else {
             streamedInputText = newValue
             return delta
         }
 
         resumeFollowForInput(pane)
+        let generation = model.connectionGeneration
         Task {
             await model.sendInputDelta(
                 backspaceCount: delta.backspaceCount,
                 insertedText: delta.insertedText,
                 enter: false,
-                to: pane
+                to: pane,
+                expectedGeneration: generation
             )
         }
         streamedInputText = newValue
@@ -871,7 +965,7 @@ struct WindowDetailView: View {
         keyModifiers.shift = false
         let command = text
         guard allowEmpty || !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard let pane = selectedPane else { return }
+        guard canSendTerminalInput, let pane = selectedPane else { return }
 
         commandIdleSubmitTask?.cancel()
         let delta = inputDelta(from: streamedInputText, to: command)
@@ -883,17 +977,25 @@ struct WindowDetailView: View {
         }
 
         resumeFollowForInput(pane)
+        let generation = model.connectionGeneration
         Task {
-            await model.sendInputDelta(
+            let delivered = await model.sendInputDelta(
                 backspaceCount: delta.backspaceCount,
                 insertedText: delta.insertedText,
                 enter: true,
-                to: pane
+                to: pane,
+                expectedGeneration: generation
             )
+            if !delivered, selectedPane?.id == pane.id, commandText.isEmpty {
+                suppressInputChange = true
+                commandText = command
+                DispatchQueue.main.async { suppressInputChange = false }
+            }
         }
     }
 
     private func clearCommandBox() {
+        guard canSendTerminalInput else { return }
         commandIdleSubmitTask?.cancel()
         let pendingText = streamedInputText
 
@@ -906,28 +1008,33 @@ struct WindowDetailView: View {
 
         guard !pendingText.isEmpty, let pane = selectedPane else { return }
         resumeFollowForInput(pane)
+        let generation = model.connectionGeneration
         Task {
             await model.sendInputDelta(
                 backspaceCount: pendingText.count,
                 insertedText: "",
                 enter: false,
-                to: pane
+                to: pane,
+                expectedGeneration: generation
             )
         }
     }
 
     private func sendCommandText(_ command: String, to pane: TmuxPane) {
+        guard canSendTerminalInput, pane.id == selectedPane?.id else { return }
         let cleanedCommand = VoiceCommandAutoSubmit.commandByRemovingSubmitPhrase(from: command).command
         guard !cleanedCommand.isEmpty else { return }
 
         commandIdleSubmitTask?.cancel()
         resumeFollowForInput(pane)
+        let generation = model.connectionGeneration
         Task {
             await model.sendInputDelta(
                 backspaceCount: 0,
                 insertedText: cleanedCommand,
                 enter: true,
-                to: pane
+                to: pane,
+                expectedGeneration: generation
             )
         }
     }
@@ -998,7 +1105,11 @@ struct WindowDetailView: View {
     }
 
     private func sendMacro(_ macro: TmuxMacro) {
-        guard let pane = selectedPane else { return }
+        guard canSendTerminalInput, let pane = selectedPane else { return }
+        if macro.key == "Enter" {
+            sendEnter()
+            return
+        }
         let macro = keyModifiers.consume(macro)
         if macro.preservesViewport {
             follow = false
@@ -1006,7 +1117,8 @@ struct WindowDetailView: View {
         } else {
             requestPaneScroll(.bottom)
         }
-        Task { await model.send(macro, to: pane) }
+        let generation = model.connectionGeneration
+        Task { await model.send(macro, to: pane, expectedGeneration: generation) }
     }
 
     private func terminalInteractionModeOverrides() -> [String: TerminalInteractionMode] {
@@ -1029,6 +1141,7 @@ struct WindowDetailView: View {
 
     private func switchToWindow(_ tmuxWindow: TmuxWindow, in tmuxSession: TmuxSession? = nil) {
         keyModifiers.shift = false
+        selectionUnavailable = true
         let targetSession = tmuxSession ?? session(for: tmuxWindow)
         selectedSessionId = targetSession.id
         selectedWindowId = tmuxWindow.id
@@ -1042,6 +1155,7 @@ struct WindowDetailView: View {
             await model.refreshWindows(for: targetSession)
             let loadedWindow = model.windows(for: targetSession).first { $0.id == tmuxWindow.id } ?? tmuxWindow
             selectedPaneId = model.activePane(for: loadedWindow)?.id
+            selectionUnavailable = selectedPaneId == nil
             if let selectedPaneId {
                 model.setFollow(selectedPaneId, enabled: true)
                 if let pane = model.panes(for: loadedWindow).first(where: { $0.id == selectedPaneId }) {
@@ -1053,6 +1167,7 @@ struct WindowDetailView: View {
     }
 
     private func switchToPane(_ pane: TmuxPane, in tmuxWindow: TmuxWindow, session tmuxSession: TmuxSession? = nil) {
+        selectionUnavailable = true
         let targetSession = tmuxSession ?? session(for: tmuxWindow)
         selectedSessionId = targetSession.id
         selectedWindowId = tmuxWindow.id
@@ -1068,6 +1183,7 @@ struct WindowDetailView: View {
             let loadedWindow = model.windows(for: targetSession).first { $0.id == tmuxWindow.id } ?? tmuxWindow
             await model.select(pane, in: loadedWindow)
             selectedPaneId = pane.id
+            selectionUnavailable = false
             model.setFollow(pane.id, enabled: true)
             scrollRequest = PaneScrollRequest(action: .bottom, token: scrollRequest.token + 1)
         }
@@ -1162,6 +1278,7 @@ struct WindowDetailView: View {
     private func handleScenePhaseChange(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            guard model.isSuspended || model.status != .connected || isRestoringTerminal else { return }
             activationRefreshTask?.cancel()
             activationRefreshTask = Task { @MainActor in
                 await restoreTerminalAfterActivation(forceFollow: true)
@@ -1169,10 +1286,9 @@ struct WindowDetailView: View {
         case .background:
             activationRefreshTask?.cancel()
             commandIdleSubmitTask?.cancel()
-            streamedInputText = commandText
-            Task { @MainActor in
-                await model.disconnect()
-            }
+            activationRequestID = nil
+            isRestoringTerminal = true
+            model.suspend()
         case .inactive:
             break
         @unknown default:
@@ -1181,39 +1297,68 @@ struct WindowDetailView: View {
     }
 
     @MainActor
-    private func restoreTerminalAfterActivation(forceFollow: Bool) async {
+    private func restoreTerminalAfterActivation(forceFollow: Bool, forceReconnect: Bool = false) async {
+        guard !Task.isCancelled, scenePhase == .active else { return }
+        let requestID = UUID()
+        activationRequestID = requestID
+        isRestoringTerminal = true
+        defer {
+            if activationRequestID == requestID { isRestoringTerminal = false }
+        }
         let previousSession = currentSession
         let previousWindow = currentWindow
-        let previousPaneId = selectedPaneId
+        let previousPaneId = selectedPane?.id
 
-        await model.reconnect()
+        if forceReconnect && !model.isSuspended {
+            await model.reconnect()
+        } else {
+            await model.activate()
+        }
+        guard !Task.isCancelled, scenePhase == .active, model.status == .connected else { return }
 
-        let restoredSession = model.sessions.first { $0.id == previousSession.id }
-            ?? model.sessions.first { $0.name == previousSession.name }
-            ?? previousSession
+        guard let restoredSession = model.sessions.first(where: { $0.id == previousSession.id }) else {
+            selectionUnavailable = true
+            selectedPaneId = nil
+            model.errorMessage = "The previous tmux session is no longer available."
+            return
+        }
 
-        await model.refreshWindows(for: restoredSession)
+        // Refresh only the open window, not every pane in the workspace.
+        await model.refreshWindow(previousWindow)
+        guard !Task.isCancelled, scenePhase == .active, model.status == .connected else { return }
 
-        let restoredWindow = model.windows(for: restoredSession).first { $0.id == previousWindow.id }
-            ?? model.windows(for: restoredSession).first {
-                $0.name == previousWindow.name && $0.index == previousWindow.index
-            }
-            ?? model.windows(for: restoredSession).first { $0.name == previousWindow.name }
-            ?? previousWindow
+        guard let restoredWindow = model.windows(for: restoredSession).first(where: { $0.id == previousWindow.id }) else {
+            selectionUnavailable = true
+            selectedPaneId = nil
+            model.errorMessage = "The previous tmux window is no longer available."
+            return
+        }
 
         selectedSessionId = restoredSession.id
         selectedWindowId = restoredWindow.id
-        await model.loadWindow(restoredWindow)
 
         let restoredPanes = model.panes(for: restoredWindow)
         let restoredPane = previousPaneId.flatMap { paneId in
             restoredPanes.first { $0.id == paneId }
-        } ?? model.activePane(for: restoredWindow) ?? restoredPanes.first
+        }
 
         selectedPaneId = restoredPane?.id
-        streamedInputText = commandText
 
-        guard let restoredPane else { return }
+        guard let restoredPane else {
+            selectionUnavailable = true
+            model.errorMessage = "The previous tmux pane is no longer available."
+            return
+        }
+        selectionUnavailable = false
+        if terminalViewportWidth > 0, terminalViewportHeight > 0 {
+            await model.resizeForDisplay(
+                restoredPane,
+                cols: terminalColumns(availableWidth: terminalViewportWidth, fontSize: fontSize),
+                rows: terminalRows(availableHeight: terminalViewportHeight, fontSize: fontSize),
+                in: restoredWindow
+            )
+        }
+        guard !Task.isCancelled, scenePhase == .active, model.status == .connected else { return }
         if forceFollow {
             follow = true
         }
@@ -1228,7 +1373,7 @@ struct WindowDetailView: View {
 
     private func refreshSelectedPane(forceReconnect: Bool = false) async {
         if forceReconnect {
-            await restoreTerminalAfterActivation(forceFollow: true)
+            await restoreTerminalAfterActivation(forceFollow: true, forceReconnect: true)
             return
         }
 
@@ -1274,6 +1419,7 @@ struct WindowDetailView: View {
             requestPaneScroll(.bottom)
             return
         }
+        guard canSendTerminalInput else { return }
 
         follow = true
         model.setFollow(pane.id, enabled: true)
@@ -1320,6 +1466,7 @@ struct WindowDetailView: View {
     }
 
     private func sendTerminalPage(_ direction: TerminalPageDirection, to pane: TmuxPane) async {
+        guard canSendTerminalInput else { return }
         follow = false
         model.setFollow(pane.id, enabled: false)
         await model.send(direction.macro, to: pane)
@@ -1373,9 +1520,9 @@ struct WindowDetailView: View {
     }
 
     private func terminalRows(availableHeight: CGFloat, fontSize: CGFloat) -> Int {
-        let usableHeight = max(120, availableHeight - 24)
-        let lineHeight = max(10, fontSize * 1.25)
-        return max(10, min(80, Int(usableHeight / lineHeight)))
+        let usableHeight = max(0, availableHeight - 6)
+        let lineHeight = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular).lineHeight + 2
+        return max(3, min(80, Int(usableHeight / lineHeight)))
     }
 
     private func terminalContentWidth(columns: Int, availableWidth: CGFloat, fontSize: CGFloat) -> CGFloat {
@@ -1395,6 +1542,13 @@ struct WindowDetailView: View {
     private func selectedPaneColumnCountForFit() -> Int {
         guard let pane = selectedPane else { return 80 }
         return max(24, pane.width)
+    }
+
+    private func resetLocalCommandBox() {
+        suppressInputChange = true
+        commandText = ""
+        streamedInputText = ""
+        DispatchQueue.main.async { suppressInputChange = false }
     }
 
     private func longestLineLength(in snapshot: TmuxPaneSnapshot) -> Int {
@@ -1425,6 +1579,7 @@ struct WindowDetailView: View {
 
         func makeUIView(context: Context) -> UITextView {
             let textView = UITextView()
+            textView.accessibilityIdentifier = "tmux-output"
             textView.delegate = context.coordinator
             textView.isEditable = false
             textView.isSelectable = true

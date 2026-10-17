@@ -5,6 +5,7 @@ enum TmuxProtocolError: LocalizedError, Equatable {
     case malformedControlLine(String)
     case disconnected
     case startupTimedOut
+    case commandTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +17,8 @@ enum TmuxProtocolError: LocalizedError, Equatable {
             "tmux control session disconnected"
         case .startupTimedOut:
             "SSH connected, but tmux did not finish starting within 15 seconds. Check that tmux is installed and available in the login shell."
+        case .commandTimedOut:
+            "The terminal connection stopped responding. Input was not resent."
         }
     }
 }

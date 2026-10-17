@@ -6,7 +6,7 @@ import os
 
 private let tmuxLogger = Logger(subsystem: "com.zeromissionllc.hermit", category: "TmuxControl")
 
-actor TmuxControlClient {
+actor TmuxControlClient: TmuxCommandClient {
     nonisolated let events: AsyncStream<TmuxControlEvent>
 
     private let eventContinuation: AsyncStream<TmuxControlEvent>.Continuation
@@ -19,6 +19,8 @@ actor TmuxControlClient {
     private var pendingCommands: [Int: CheckedContinuation<String, Error>] = [:]
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var startupTimeoutTask: Task<Void, Never>?
+    private var commandTimeoutTask: Task<Void, Never>?
+    private var writeTask: Task<Void, Never>?
     private var didFinish = false
 
     init(connection: SSHClientConnection) {
@@ -91,20 +93,25 @@ actor TmuxControlClient {
     }
 
     func send(_ command: String) async throws -> String {
-        guard let writer else {
+        guard !didFinish, let writer else {
             throw TmuxProtocolError.disconnected
         }
 
         return try await withCheckedThrowingContinuation { continuation in
             waitingForBegin.append(continuation)
-            Task {
+            if commandTimeoutTask == nil { armCommandTimeout() }
+            let previousWrite = writeTask
+            writeTask = Task {
+                await previousWrite?.value
+                guard !didFinish else { return }
                 do {
                     var buffer = ByteBufferAllocator().buffer(capacity: command.utf8.count + 1)
                     buffer.writeString(command)
                     buffer.writeString("\n")
                     try await writer.write(buffer)
                 } catch {
-                    self.failOldestWaitingCommand(error)
+                    finish(error: error)
+                    await connection.close()
                 }
             }
         }
@@ -113,8 +120,8 @@ actor TmuxControlClient {
     func disconnect() async {
         lifecycleTask?.cancel()
         lifecycleTask = nil
-        await connection.close()
         finish(error: TmuxProtocolError.disconnected)
+        await connection.close()
     }
 
     private func setWriter(_ writer: TTYStdinWriter) {
@@ -160,6 +167,7 @@ actor TmuxControlClient {
             } else {
                 continuation.resume(returning: block.output)
             }
+            armCommandTimeout()
         case .event(let event):
             eventContinuation.yield(event)
             if event == .exit {
@@ -168,9 +176,14 @@ actor TmuxControlClient {
         }
     }
 
-    private func failOldestWaitingCommand(_ error: Error) {
-        if !waitingForBegin.isEmpty {
-            waitingForBegin.removeFirst().resume(throwing: error)
+    private func armCommandTimeout() {
+        commandTimeoutTask?.cancel()
+        commandTimeoutTask = nil
+        guard !waitingForBegin.isEmpty || !pendingCommands.isEmpty else { return }
+        commandTimeoutTask = Task {
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            finish(error: TmuxProtocolError.commandTimedOut)
+            await connection.close()
         }
     }
 
@@ -179,6 +192,10 @@ actor TmuxControlClient {
         didFinish = true
         startupTimeoutTask?.cancel()
         startupTimeoutTask = nil
+        commandTimeoutTask?.cancel()
+        commandTimeoutTask = nil
+        writeTask?.cancel()
+        writeTask = nil
 
         writer = nil
         startContinuation?.resume(throwing: error)

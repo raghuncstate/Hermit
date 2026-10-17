@@ -8,7 +8,7 @@ enum TmuxCommandQuoter {
 
 enum TmuxLaunchCommand {
     static func controlMode(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {
-        "\(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) -CC new-session -A -s \(TmuxCommandQuoter.quote(sessionName))"
+        "\(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) -CC new-session -A -f ignore-size -s \(TmuxCommandQuoter.quote(sessionName))"
     }
 
     static func interactive(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {
@@ -36,7 +36,13 @@ enum TmuxLaunchCommand {
     }
 }
 
-extension TmuxControlClient {
+protocol TmuxCommandClient: AnyObject, Sendable {
+    var events: AsyncStream<TmuxControlEvent> { get }
+    func send(_ command: String) async throws -> String
+    func disconnect() async
+}
+
+extension TmuxCommandClient {
     func listSessions() async throws -> [TmuxSession] {
         let output = try await send("list-sessions -F '#{session_id}|#{session_name}|#{session_attached}|#{session_activity}'")
         return output.nonEmptyLines.compactMap { line in
@@ -175,6 +181,7 @@ extension TmuxControlClient {
     func resizeDisplay(windowId: String, cols: Int, rows: Int) async throws {
         let target = TmuxCommandQuoter.quote(windowId)
         _ = try await send("refresh-client -C \(cols)x\(rows)")
+        try Task.checkCancellation()
         _ = try await send("resize-window -t \(target) -x \(cols) -y \(rows)")
     }
 
@@ -192,8 +199,10 @@ extension TmuxControlClient {
             return
         }
 
-        let suffix = enter ? " Enter" : ""
-        _ = try await send("send-keys -t \(target) -- \(TmuxCommandQuoter.quote(text))\(suffix)")
+        _ = try await send("send-keys -l -t \(target) -- \(TmuxCommandQuoter.quote(text))")
+        if enter {
+            _ = try await send("send-keys -t \(target) Enter")
+        }
     }
 
     func sendKey(_ key: String, to paneId: String) async throws {

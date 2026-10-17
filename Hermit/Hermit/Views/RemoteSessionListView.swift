@@ -107,11 +107,12 @@ struct RemoteSessionListView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task {
-                    await model.connectIfNeeded()
+                    guard scenePhase == .active else { return }
+                    await model.activate()
                     await model.refreshSessions()
                 }
             } else if phase == .background {
-                Task { await model.disconnect() }
+                model.suspend()
             }
         }
         .alert("New tmux Session", isPresented: $showingNewSession) {

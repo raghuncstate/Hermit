@@ -96,7 +96,7 @@ final class TmuxProtocolParserTests: XCTestCase {
     func testLaunchCommandUsesDedicatedSocketWhenConfigured() {
         XCTAssertEqual(
             TmuxLaunchCommand.controlMode(sessionName: "hermit-mobile", socketName: "hermit-mobile"),
-            "tmux -L 'hermit-mobile' -CC new-session -A -s 'hermit-mobile'"
+            "tmux -L 'hermit-mobile' -CC new-session -A -f ignore-size -s 'hermit-mobile'"
         )
         XCTAssertEqual(
             TmuxLaunchCommand.interactive(sessionName: "0", socketName: nil),

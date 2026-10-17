@@ -1,5 +1,48 @@
 # SSH connection regressions
 
+## Foreground input and display recovery, 1.4.0 (2026101702)
+
+The terminal previously appended a speculative echo to the end of captured tmux
+text. It did not know the remote application's cursor position, so a TUI could
+show typed text after a right-aligned footer even when SSH delivery failed.
+The parent and detail screens could also start competing reconnects. Cached
+viewport dimensions were not reliably reapplied to the new control client.
+
+- Render only captured terminal output. Keep immediate typing in the command
+  field, but do not represent a local edit as remotely delivered output.
+- Coalesce connection attempts; invalidate background connections synchronously.
+  Old connection replies and shutdowns cannot replace or close the new client.
+- Preserve the exact selected pane on foreground restoration. Disable terminal
+  commands until that pane is restored; do not fall back to a different pane.
+- Serialize edits, macros, and Enter. Pin queued input to its connection and do
+  not replay input after an uncertain acknowledgment. Show an explicit recovery
+  state instead, retaining the local draft where possible.
+- Bound stalled control commands to eight seconds and complete pending requests
+  before awaiting SSH close. Serialize writes in the same order as reply slots.
+- Attach control clients with `ignore-size`, reapply the selected display size,
+  and stop cancelled keyboard resizes before changing the window.
+- Add a one-tap Shift+Left key (`S-Left`, raw sequence `ESC [ 1 ; 2 D`). Keep the
+  keyboard focused after Return, including submitting an empty line.
+- In landscape with the keyboard open, share a row for keys/composer and hide
+  navigation chrome. The Hide Keyboard control restores the normal navigation.
+
+`TmuxForegroundTests` covers connection races, stale queued keys, non-replay,
+literal text, edit ordering, remote-only output, resizing, and Shift+Left.
+`tools/tests/run_terminal_simulator_tests.py` runs the real terminal UI through
+a disposable loopback-only sshd and a uniquely named `hermit-test-` tmux socket.
+It checks five portrait foreground cycles plus a landscape cycle, exact input,
+raw Shift+Left, repeated Return, and a visible terminal above the keyboard.
+It never connects to production hosts or changes their tmux servers. Run only
+after obtaining simulator UI automation approval. Physical-device/network-handoff
+testing remains separate from these simulator checks.
+
+Final validation on iPhone 17 Pro Max and iPhone SE (3rd generation), iOS 26.5:
+the full regression suite passed on each (92 unique tests, 96 parameterized
+invocations), as did a separate 12-test terminal fixture suite on each.
+There were no failures, skips, or recorded runtime warnings. Portrait and
+landscape screenshots were inspected. Release archive, internal-TestFlight
+export, signature verification, and bundled-credential/fixture scans passed.
+
 ## Linux startup and continuous-output hotfix, 1.3.2 (2026091902)
 
 The 1.3.1 startup acknowledgement check exposed an existing parser assumption:

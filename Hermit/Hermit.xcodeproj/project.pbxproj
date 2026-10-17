@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E30000000000000000000001 /* TmuxForegroundTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E31000000000000000000001; };
+		E30000000000000000000002 /* TerminalForegroundUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E31000000000000000000002; };
 		D20000000000000000000006 = {isa = PBXBuildFile; fileRef = D21000000000000000000006; };
 		D20000000000000000000007 = {isa = PBXBuildFile; fileRef = D21000000000000000000007; };
 		D20000000000000000000001 /* AgentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D21000000000000000000001; };
@@ -66,6 +68,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E31000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TmuxForegroundTests.swift; sourceTree = "<group>"; };
+		E31000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalForegroundUITests.swift; sourceTree = "<group>"; };
 		D21000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessagingTests.swift; sourceTree = "<group>"; };
 		D21000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessagingUITests.swift; sourceTree = "<group>"; };
 		D21000000000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HermitUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -137,7 +141,7 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		D22000000000000000000002 = {isa = PBXGroup; children = (D21000000000000000000007); path = HermitUITests; sourceTree = "<group>"; };
+		D22000000000000000000002 = {isa = PBXGroup; children = (D21000000000000000000007, E31000000000000000000002); path = HermitUITests; sourceTree = "<group>"; };
 		D22000000000000000000001 /* Messaging */ = {
 			isa = PBXGroup;
 			children = (D21000000000000000000001, D21000000000000000000002, D21000000000000000000003, D21000000000000000000004, D21000000000000000000005);
@@ -149,6 +153,7 @@
 			children = (
 				D21000000000000000000006,
 				281571BEA9FA0A063ED80B4A /* ModelTests.swift */,
+				E31000000000000000000001 /* TmuxForegroundTests.swift */,
 				92006A94E8BEE3AAE62B6C19 /* RibbonConfigTests.swift */,
 				B93D8483C507AE268486180F /* DataStoreTests.swift */,
 				40AD2C9FD9796DDCE059852F /* URLSchemeTests.swift */,
@@ -387,13 +392,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		D25000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D20000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+		D25000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D20000000000000000000007, E30000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
 		6E010B3D85AA514D3FB28B7F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				D20000000000000000000006,
 				9338B8421E2ADFC2C45471BD /* ModelTests.swift in Sources */,
+				E30000000000000000000001 /* TmuxForegroundTests.swift in Sources */,
 				DFCF0B3F36E792A3642C085B /* RibbonConfigTests.swift in Sources */,
 				698EC92E23FFC9F980449B63 /* DataStoreTests.swift in Sources */,
 				3602275B36C43BCED095D43D /* URLSchemeTests.swift in Sources */,
@@ -538,7 +544,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Hermit/HermitDev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2026101701;
+				CURRENT_PROJECT_VERSION = 2026101702;
 				DEVELOPMENT_TEAM = XY6CJ6B92K;
 				INFOPLIST_FILE = Hermit/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = " @executable_path/Frameworks";
@@ -557,7 +563,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Hermit/HermitDev.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2026101701;
+				CURRENT_PROJECT_VERSION = 2026101702;
 				DEVELOPMENT_TEAM = XY6CJ6B92K;
 				INFOPLIST_FILE = Hermit/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = " @executable_path/Frameworks";

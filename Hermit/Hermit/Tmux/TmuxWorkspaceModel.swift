@@ -64,17 +64,10 @@ struct TmuxKeyModifiers {
 @MainActor
 @Observable
 final class TmuxWorkspaceModel {
-    private struct PendingLocalEcho {
-        var text: String
-        var expiresAt: Date
-    }
-
     private static let outputCaptureIntervalNanoseconds: UInt64 = 16_000_000
-    private static let inputRefreshDelayNanoseconds: UInt64 = 16_000_000
     private static let livePollIntervalNanoseconds: UInt64 = 200_000_000
     private static let liveCaptureHistoryLimit = 240
     private static let scrollbackCaptureHistoryLimit = 3000
-    private static let localEchoDuration: TimeInterval = 1.2
 
     let host: Host
     var status: TmuxConnectionStatus = .disconnected
@@ -83,8 +76,17 @@ final class TmuxWorkspaceModel {
     var panesByWindow: [String: [TmuxPane]] = [:]
     var snapshotsByPane: [String: TmuxPaneSnapshot] = [:]
     var errorMessage: String?
+    private(set) var inputErrorMessage: String?
+    private(set) var isSuspended = false
+    private(set) var connectionGeneration = 0
 
-    private var client: TmuxControlClient?
+    private var client: (any TmuxCommandClient)?
+    private let makeClient: @Sendable (Host) async throws -> any TmuxCommandClient
+    private var connectionTask: Task<Void, Never>?
+    private var closingTask: Task<Void, Never>?
+    private var inputTask: Task<Bool, Never>?
+    private var inputRequestID: UUID?
+    private var displaySizesByWindow: [String: String] = [:]
     private var eventTask: Task<Void, Never>?
     private var followedPaneIds: Set<String> = []
     private var outputCaptureTasks: [String: Task<Void, Never>] = [:]
@@ -92,54 +94,98 @@ final class TmuxWorkspaceModel {
     private var captureRequests: [String: UUID] = [:]
     private var pendingCaptureHistoryLimits: [String: Int] = [:]
     private var sparseFrameSkipCounts: [String: Int] = [:]
-    private var pendingLocalEchoByPane: [String: PendingLocalEcho] = [:]
-    private var connectionGeneration = 0
-
-    init(host: Host) {
+    init(
+        host: Host,
+        makeClient: @escaping @Sendable (Host) async throws -> any TmuxCommandClient = {
+            try await TmuxControlClient.connect(host: $0, sessionName: $0.defaultTmuxSessionName)
+        }
+    ) {
         self.host = host
+        self.makeClient = makeClient
     }
 
     func connectIfNeeded() async {
+        guard !isSuspended, !Task.isCancelled else { return }
+        if let connectionTask {
+            await connectionTask.value
+            return
+        }
         guard client == nil else { return }
         await reconnect()
     }
 
     func reconnect() async {
+        guard !isSuspended, !Task.isCancelled else { return }
+        if let connectionTask {
+            await connectionTask.value
+            return
+        }
         let generation = nextConnectionGeneration()
-        await closeCurrentConnection()
-        guard isCurrentConnectionGeneration(generation) else { return }
-
+        let closing = closeCurrentConnection()
         status = .connecting
         errorMessage = nil
 
-        do {
-            let controlClient = try await TmuxControlClient.connect(
-                host: host,
-                sessionName: host.defaultTmuxSessionName
-            )
-            guard isCurrentConnectionGeneration(generation) else {
-                await controlClient.disconnect()
-                return
+        let task = Task { @MainActor in
+            await closing.value
+            guard !Task.isCancelled, !isSuspended, isCurrentConnectionGeneration(generation) else { return }
+            do {
+                let controlClient = try await makeClient(host)
+                guard !Task.isCancelled, !isSuspended, isCurrentConnectionGeneration(generation) else {
+                    await controlClient.disconnect()
+                    return
+                }
+                client = controlClient
+                status = .connected
+                startEventPump(controlClient, generation: generation)
+            } catch {
+                guard isCurrentConnectionGeneration(generation), !isSuspended else { return }
+                status = .failed(error.localizedDescription)
+                errorMessage = error.localizedDescription
             }
-            client = controlClient
-            status = .connected
-            startEventPump(controlClient, generation: generation)
-            await refreshSessions()
-        } catch {
-            guard isCurrentConnectionGeneration(generation) else { return }
-            status = .failed(error.localizedDescription)
-            errorMessage = error.localizedDescription
         }
+        connectionTask = task
+        await task.value
+        guard isCurrentConnectionGeneration(generation) else { return }
+        connectionTask = nil
+        guard client != nil else { return }
+        await refreshSessions()
+        guard isCurrentConnectionGeneration(generation), client != nil else { return }
+        for paneId in followedPaneIds { startLivePolling(paneId: paneId) }
     }
 
     func disconnect() async {
-        let generation = nextConnectionGeneration()
-        await closeCurrentConnection()
-        guard isCurrentConnectionGeneration(generation) else { return }
-        status = .disconnected
+        let closing = invalidateConnection()
+        await closing.value
     }
 
-    private func closeCurrentConnection() async {
+    // Invalidate synchronously: delayed background tasks cannot close a new connection.
+    func suspend() {
+        guard !isSuspended else { return }
+        isSuspended = true
+        _ = invalidateConnection()
+    }
+
+    func activate() async {
+        isSuspended = false
+        await connectIfNeeded()
+    }
+
+    private func invalidateConnection() -> Task<Void, Never> {
+        _ = nextConnectionGeneration()
+        let opening = connectionTask
+        opening?.cancel()
+        connectionTask = nil
+        let closing = closeCurrentConnection()
+        status = .disconnected
+        let task = Task {
+            await closing.value
+            await opening?.value
+        }
+        closingTask = task
+        return task
+    }
+
+    private func closeCurrentConnection() -> Task<Void, Never> {
         eventTask?.cancel()
         eventTask = nil
         let existingClient = client
@@ -151,10 +197,14 @@ final class TmuxWorkspaceModel {
         captureRequests.removeAll()
         pendingCaptureHistoryLimits.removeAll()
         sparseFrameSkipCounts.removeAll()
-        pendingLocalEchoByPane.removeAll()
-        if let existingClient {
-            await existingClient.disconnect()
+        displaySizesByWindow.removeAll()
+        let previousClosing = closingTask
+        let task = Task {
+            await previousClosing?.value
+            await existingClient?.disconnect()
         }
+        closingTask = task
+        return task
     }
 
     private func nextConnectionGeneration() -> Int {
@@ -167,12 +217,13 @@ final class TmuxWorkspaceModel {
     }
 
     @discardableResult
-    private func connectedClient() async -> TmuxControlClient? {
+    private func connectedClient() async -> (any TmuxCommandClient)? {
+        guard !isSuspended, !Task.isCancelled else { return nil }
         if let client {
             return client
         }
 
-        await reconnect()
+        await connectIfNeeded()
         return client
     }
 
@@ -280,11 +331,9 @@ final class TmuxWorkspaceModel {
             let rawText = try await withConnectedClient { client in
                 try await client.capturePane(paneId: paneId, historyLimit: requestedHistoryLimit)
             }
-            let displayText = textWithPendingLocalEcho(rawText, paneId: paneId)
-
-            if shouldAcceptCapture(displayText, paneId: paneId, historyLimit: requestedHistoryLimit) {
-                if snapshotsByPane[paneId]?.rawText != displayText {
-                    snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: displayText)
+            if shouldAcceptCapture(rawText, paneId: paneId, historyLimit: requestedHistoryLimit) {
+                if snapshotsByPane[paneId]?.rawText != rawText {
+                    snapshotsByPane[paneId] = TmuxPaneSnapshot(paneId: paneId, rawText: rawText)
                 }
             } else {
                 scheduleOutputCapture(paneId: paneId)
@@ -331,138 +380,104 @@ final class TmuxWorkspaceModel {
         }
     }
 
-    func send(_ macro: TmuxMacro, to pane: TmuxPane) async {
-        do {
+    var canSendInput: Bool {
+        !isSuspended && status == .connected && client != nil && inputErrorMessage == nil
+    }
+
+    func acknowledgeInputError() {
+        inputErrorMessage = nil
+    }
+
+    @discardableResult
+    func send(_ macro: TmuxMacro, to pane: TmuxPane, expectedGeneration: Int? = nil) async -> Bool {
+        await sendInput(to: pane, expectedGeneration: expectedGeneration) { client in
             if macro.sendsLiteralText {
-                echoInputText(macro.key, to: pane)
-                if macro.appendsEnter {
-                    echoEnter(to: pane)
-                }
-            } else if macro.key == "Enter" {
-                echoEnter(to: pane)
+                try await client.sendText(macro.key, to: pane.id, enter: macro.appendsEnter)
+            } else {
+                try await client.sendKey(macro.key, to: pane.id)
             }
-
-            try await withConnectedClient { client in
-                if macro.sendsLiteralText {
-                    try await client.sendText(macro.key, to: pane.id, enter: macro.appendsEnter)
-                } else {
-                    try await client.sendKey(macro.key, to: pane.id)
-                }
-            }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
         }
     }
 
-    func sendCommand(_ command: String, to pane: TmuxPane) async {
-        do {
-            echoSubmittedCommand(command, to: pane)
-            try await withConnectedClient { client in
-                try await client.sendText(command, to: pane.id, enter: true)
-            }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
+    @discardableResult
+    func sendCommand(_ command: String, to pane: TmuxPane) async -> Bool {
+        await sendInput(to: pane) { client in
+            try await client.sendText(command, to: pane.id, enter: true)
         }
     }
 
-    func sendInputText(_ text: String, to pane: TmuxPane) async {
-        guard !text.isEmpty else { return }
-        do {
-            echoInputText(text, to: pane)
-            try await withConnectedClient { client in
-                try await client.sendText(text, to: pane.id, enter: false)
-            }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
-        }
+    @discardableResult
+    func sendInputText(_ text: String, to pane: TmuxPane) async -> Bool {
+        await sendInputDelta(backspaceCount: 0, insertedText: text, enter: false, to: pane)
     }
 
-    func sendBackspace(count: Int, to pane: TmuxPane) async {
-        guard count > 0 else { return }
-        do {
-            echoBackspace(count: count, to: pane)
-            try await withConnectedClient { client in
-                try await client.sendBackspace(count: count, to: pane.id)
-            }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
-        }
+    @discardableResult
+    func sendBackspace(count: Int, to pane: TmuxPane) async -> Bool {
+        await sendInputDelta(backspaceCount: count, insertedText: "", enter: false, to: pane)
     }
 
-    func sendInputDelta(backspaceCount: Int, insertedText: String, enter: Bool, to pane: TmuxPane) async {
-        guard backspaceCount > 0 || !insertedText.isEmpty || enter else { return }
-        do {
-            echoBackspace(count: backspaceCount, to: pane)
-            echoInputText(insertedText, to: pane)
+    @discardableResult
+    func sendInputDelta(backspaceCount: Int, insertedText: String, enter: Bool, to pane: TmuxPane, expectedGeneration: Int? = nil) async -> Bool {
+        guard backspaceCount > 0 || !insertedText.isEmpty || enter else { return true }
+        return await sendInput(to: pane, expectedGeneration: expectedGeneration) { client in
+            if backspaceCount > 0 {
+                try await client.sendBackspace(count: backspaceCount, to: pane.id)
+            }
+            if !insertedText.isEmpty {
+                try await client.sendText(insertedText, to: pane.id, enter: false)
+            }
             if enter {
-                echoEnter(to: pane)
-            }
-
-            try await withConnectedClient { client in
-                if backspaceCount > 0 {
-                    try await client.sendBackspace(count: backspaceCount, to: pane.id)
-                }
-                if !insertedText.isEmpty {
-                    try await client.sendText(insertedText, to: pane.id, enter: false)
-                }
-                if enter {
-                    try await client.sendText("", to: pane.id, enter: true)
-                }
-            }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
-        }
-    }
-
-    func sendEnter(to pane: TmuxPane) async {
-        do {
-            echoEnter(to: pane)
-            try await withConnectedClient { client in
                 try await client.sendText("", to: pane.id, enter: true)
             }
-            await captureAfterInput(pane)
-        } catch {
-            handle(error)
         }
     }
 
-    func echoSubmittedCommand(_ command: String, to pane: TmuxPane) {
-        appendLocalEcho(command + "\n", paneId: pane.id)
+    @discardableResult
+    func sendEnter(to pane: TmuxPane) async -> Bool {
+        await sendInputDelta(backspaceCount: 0, insertedText: "", enter: true, to: pane)
     }
 
-    func echoInputText(_ text: String, to pane: TmuxPane) {
-        appendLocalEcho(text, paneId: pane.id)
-    }
-
-    func echoEnter(to pane: TmuxPane) {
-        appendLocalEcho("\n", paneId: pane.id)
-    }
-
-    func echoBackspace(count: Int, to pane: TmuxPane) {
-        guard count > 0 else { return }
-        guard var pendingEcho = pendingLocalEchoByPane[pane.id], !pendingEcho.text.isEmpty else { return }
-
-        let removalCount = min(count, pendingEcho.text.count)
-        pendingEcho.text.removeLast(removalCount)
-        pendingEcho.expiresAt = Date().addingTimeInterval(Self.localEchoDuration)
-
-        if pendingEcho.text.isEmpty {
-            pendingLocalEchoByPane[pane.id] = nil
-        } else {
-            pendingLocalEchoByPane[pane.id] = pendingEcho
+    private func sendInput(
+        to pane: TmuxPane,
+        expectedGeneration: Int? = nil,
+        operation: @escaping @MainActor (any TmuxCommandClient) async throws -> Void
+    ) async -> Bool {
+        if let expectedGeneration, expectedGeneration != connectionGeneration {
+            inputErrorMessage = "Input was interrupted by a connection change. Check the prompt before continuing; the input was not resent."
+            return false
         }
-
-        var displayedText = snapshotsByPane[pane.id]?.rawText ?? ""
-        let displayRemovalCount = min(removalCount, displayedText.count)
-        if displayRemovalCount > 0 {
-            displayedText.removeLast(displayRemovalCount)
-            snapshotsByPane[pane.id] = TmuxPaneSnapshot(paneId: pane.id, rawText: displayedText)
+        guard canSendInput, let client else { return false }
+        let generation = connectionGeneration
+        let previous = inputTask
+        let requestID = UUID()
+        // Keep edits and Enter ordered. Never replay a possibly delivered command
+        // on another SSH connection, or synthesize output without a terminal cursor.
+        let task = Task { @MainActor in
+            if let previous, !(await previous.value) { return false }
+            guard isCurrentConnectionGeneration(generation), canSendInput else {
+                inputErrorMessage = "Input was interrupted by a connection change. Check the prompt before continuing; the input was not resent."
+                return false
+            }
+            do {
+                try await operation(client)
+                guard isCurrentConnectionGeneration(generation) else { throw CancellationError() }
+                queuePendingCapture(paneId: pane.id, historyLimit: Self.liveCaptureHistoryLimit)
+                schedulePendingCapture(paneId: pane.id)
+                return true
+            } catch {
+                inputErrorMessage = "Input delivery could not be confirmed. Check the prompt before continuing; the input was not resent."
+                if isCurrentConnectionGeneration(generation) { handle(error) }
+                return false
+            }
         }
+        inputTask = task
+        inputRequestID = requestID
+        let delivered = await task.value
+        if inputRequestID == requestID {
+            inputTask = nil
+            inputRequestID = nil
+        }
+        return delivered
     }
 
     func newSession(named name: String) async {
@@ -639,7 +654,8 @@ final class TmuxWorkspaceModel {
     func resizeForDisplay(_ pane: TmuxPane, cols: Int, rows: Int, in window: TmuxWindow) async {
         guard cols > 0, rows > 0 else { return }
         let singlePaneWindow = panes(for: window).count <= 1
-        if singlePaneWindow {
+        let sizeKey = "\(cols)x\(rows)"
+        if singlePaneWindow, displaySizesByWindow[window.id] == sizeKey {
             guard abs(pane.width - cols) > 1 || abs(pane.height - rows) > 1 else { return }
         }
 
@@ -647,6 +663,7 @@ final class TmuxWorkspaceModel {
             try await withConnectedClient { client in
                 try await client.resizeDisplay(windowId: window.id, cols: cols, rows: rows)
             }
+            displaySizesByWindow[window.id] = sizeKey
             await refreshWindow(window)
             if let resizedPane = panes(for: window).first(where: { $0.id == pane.id }) {
                 await captureLive(resizedPane)
@@ -670,7 +687,7 @@ final class TmuxWorkspaceModel {
         panes(for: window).first(where: \.isActive) ?? panes(for: window).first
     }
 
-    private func startEventPump(_ controlClient: TmuxControlClient, generation: Int) {
+    private func startEventPump(_ controlClient: any TmuxCommandClient, generation: Int) {
         eventTask?.cancel()
         eventTask = Task { [weak self] in
             for await event in controlClient.events {
@@ -679,6 +696,8 @@ final class TmuxWorkspaceModel {
                 }
                 await self?.handle(event, generation: generation)
             }
+            guard let self, isCurrentConnectionGeneration(generation), !isSuspended else { return }
+            markConnectionDropped(TmuxProtocolError.disconnected)
         }
     }
 
@@ -707,13 +726,7 @@ final class TmuxWorkspaceModel {
             break
         case .exit:
             guard isCurrentConnectionGeneration(generation) else { return }
-            status = .disconnected
-            client = nil
-            outputCaptureTasks.values.forEach { $0.cancel() }
-            outputCaptureTasks.removeAll()
-            livePollTasks.values.forEach { $0.cancel() }
-            livePollTasks.removeAll()
-            followedPaneIds.removeAll()
+            markConnectionDropped(TmuxProtocolError.disconnected)
         }
     }
 
@@ -743,17 +756,12 @@ final class TmuxWorkspaceModel {
         }
     }
 
-    private func captureAfterInput(_ pane: TmuxPane) async {
-        try? await Task.sleep(nanoseconds: Self.inputRefreshDelayNanoseconds)
-        await captureLive(pane)
-    }
-
     private func captureLive(paneId: String) async {
         await capture(paneId: paneId, historyLimit: Self.liveCaptureHistoryLimit)
     }
 
     private func startLivePolling(paneId: String) {
-        guard livePollTasks[paneId] == nil else { return }
+        guard !isSuspended, client != nil, livePollTasks[paneId] == nil else { return }
 
         livePollTasks[paneId] = Task { [weak self] in
             while !Task.isCancelled {
@@ -770,9 +778,10 @@ final class TmuxWorkspaceModel {
     }
 
     private func withConnectedClient<T>(
-        _ operation: (TmuxControlClient) async throws -> T
+        _ operation: (any TmuxCommandClient) async throws -> T
     ) async throws -> T {
         try Task.checkCancellation()
+        guard !isSuspended else { throw CancellationError() }
         guard let currentClient = await connectedClient() else {
             throw TmuxProtocolError.disconnected
         }
@@ -892,54 +901,6 @@ final class TmuxWorkspaceModel {
         return count
     }
 
-    private func appendLocalEcho(_ text: String, paneId: String) {
-        guard !text.isEmpty else { return }
-        let existingEcho = pendingLocalEchoByPane[paneId]?.text ?? ""
-        pendingLocalEchoByPane[paneId] = PendingLocalEcho(
-            text: existingEcho + text,
-            expiresAt: Date().addingTimeInterval(Self.localEchoDuration)
-        )
-
-        let existing = snapshotsByPane[paneId]?.rawText ?? ""
-        snapshotsByPane[paneId] = TmuxPaneSnapshot(
-            paneId: paneId,
-            rawText: existing + text
-        )
-    }
-
-    private func textWithPendingLocalEcho(_ rawText: String, paneId: String) -> String {
-        guard let pendingEcho = pendingLocalEchoByPane[paneId] else {
-            return rawText
-        }
-
-        if pendingEcho.expiresAt <= Date() {
-            pendingLocalEchoByPane[paneId] = nil
-            return rawText
-        }
-
-        let unappliedEcho = unappliedLocalEcho(pendingEcho.text, rawText: rawText)
-        if unappliedEcho.isEmpty {
-            pendingLocalEchoByPane[paneId] = nil
-            return rawText
-        }
-
-        return rawText + unappliedEcho
-    }
-
-    private func unappliedLocalEcho(_ echoText: String, rawText: String) -> String {
-        guard !echoText.isEmpty else { return "" }
-        let echoCharacters = Array(echoText)
-
-        for matchedCount in stride(from: echoCharacters.count, through: 1, by: -1) {
-            let echoedPrefix = String(echoCharacters.prefix(matchedCount))
-            if rawText.hasSuffix(echoedPrefix) {
-                return String(echoCharacters.dropFirst(matchedCount))
-            }
-        }
-
-        return echoText
-    }
-
     private func pane(withId paneId: String) -> TmuxPane? {
         for panes in panesByWindow.values {
             if let pane = panes.first(where: { $0.id == paneId }) {
@@ -964,7 +925,7 @@ final class TmuxWorkspaceModel {
     }
 
     private func handle(_ error: Error) {
-        guard !(error is CancellationError) else { return }
+        guard !isSuspended, !(error is CancellationError) else { return }
         errorMessage = error.localizedDescription
         if shouldReconnect(after: error) {
             markConnectionDropped(error)
@@ -977,7 +938,7 @@ final class TmuxWorkspaceModel {
         if error is CancellationError { return false }
         if let tmuxError = error as? TmuxProtocolError {
             switch tmuxError {
-            case .disconnected:
+            case .disconnected, .commandTimedOut:
                 return true
             case .commandFailed, .malformedControlLine, .startupTimedOut:
                 return false
@@ -988,22 +949,7 @@ final class TmuxWorkspaceModel {
     }
 
     private func markConnectionDropped(_ error: Error) {
-        _ = nextConnectionGeneration()
+        _ = invalidateConnection()
         errorMessage = error.localizedDescription
-        if let droppedClient = client {
-            Task { await droppedClient.disconnect() }
-        }
-        client = nil
-        eventTask?.cancel()
-        eventTask = nil
-        outputCaptureTasks.values.forEach { $0.cancel() }
-        outputCaptureTasks.removeAll()
-        livePollTasks.values.forEach { $0.cancel() }
-        livePollTasks.removeAll()
-        captureRequests.removeAll()
-        pendingCaptureHistoryLimits.removeAll()
-        sparseFrameSkipCounts.removeAll()
-        followedPaneIds.removeAll()
-        status = .disconnected
     }
 }
