@@ -53,6 +53,17 @@ async def main():
         command = shlex.join(["/usr/bin/ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                               "-o", "ConnectTimeout=12", args.upstream_host, upstream])
     else:
+        transcripts = root / ".codex/sessions"
+        transcripts.mkdir(parents=True)
+        parent = {"type": "session_meta", "payload": {"id": "fixture-parent", "cwd": str(root)}}
+        records = [parent,
+                   {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "UserMessage", "id": "u", "content": [{"type": "Text", "text": "Native fixture question"}]}}},
+                   {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "id": "a", "content": [{"type": "text", "text": "Native fixture answer"}]}}}]
+        (transcripts / "parent.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+        (transcripts / "helper.jsonl").write_text(json.dumps({"type": "session_meta", "payload": {"id": "fixture-child", "thread_source": "subagent"}}) + "\n" + json.dumps(parent) + "\n")
+        claude = root / ".claude/projects/fixture"
+        claude.mkdir(parents=True)
+        (claude / "parent.jsonl").write_text(json.dumps({"type": "assistant", "sessionId": "fixture-claude", "message": {"content": [{"type": "text", "text": "Native fixture answer"}]}}) + "\n")
         owner = bridge.Bridge(state, root, {"codex": CompletingWorker, "claude": CompletingWorker})
         server = await asyncio.start_unix_server(owner.connection, path=str(state / "bridge.sock"), limit=bridge.MAX_FRAME)
         os.chmod(state / "bridge.sock", 0o600)

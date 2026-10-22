@@ -15,6 +15,153 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 
+class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="hermit-history-test-")
+        self.home = Path(self.tmp.name)
+        self.discovery = bridge.Discovery(self.home)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def transcript(self, name, records, provider="codex"):
+        root = self.home / (".codex/sessions" if provider == "codex" else ".claude/projects")
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"".join(json.dumps(r).encode() + b"\n" for r in records))
+        return path
+
+    @staticmethod
+    def meta(sid="parent", **extra):
+        return {"type": "session_meta", "payload": {"id": sid, "cwd": "/fixture", **extra}}
+
+    @staticmethod
+    def message(body, kind="user_message"):
+        return {"type": "event_msg", "payload": {"type": kind, "message": body}}
+
+    @staticmethod
+    def item(sid, body, kind="AgentMessage"):
+        return {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": kind, "id": sid, "content": [{"type": "Text" if kind == "UserMessage" else "text", "text": body}]}}}
+
+    def only_history(self, before=None):
+        rows = self.discovery.list()
+        self.assertEqual(len(rows), 1)
+        return self.discovery.history(rows[0]["id"], before)
+
+    def test_current_codex_events_are_visible_without_internal_context(self):
+        path = self.transcript("parent.jsonl", [self.meta(),
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "internal context"}]}},
+            self.item("u", "actual question", "UserMessage"),
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "Reasoning", "raw_content": "not a chat message"}}},
+            self.item("a", "actual answer"),
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "actual answer"}]}}])
+        before = path.read_bytes()
+        messages = self.only_history()["messages"]
+        self.assertEqual([(m["role"], m["text"]) for m in messages], [("user", "actual question"), ("assistant", "actual answer")])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_legacy_and_current_formats_can_share_a_transcript(self):
+        self.transcript("parent.jsonl", [self.meta(), self.message("old question"), self.message("old answer", "agent_message"),
+                                         self.item("new-u", "new question", "UserMessage"), self.item("new-a", "new answer")])
+        self.assertEqual([m["text"] for m in self.only_history()["messages"]], ["old question", "old answer", "new question", "new answer"])
+
+    def test_item_deduplication_does_not_drop_repeated_user_text(self):
+        self.transcript("parent.jsonl", [self.meta(), self.item("u1", "again", "UserMessage"), self.item("u2", "again", "UserMessage"),
+                                         self.item("a", "answer"), self.item("a", "answer")])
+        messages = self.only_history()["messages"]
+        self.assertEqual([m["text"] for m in messages], ["again", "again", "answer"])
+        self.assertEqual(len(set(m["id"] for m in messages)), 3)
+
+    def test_codex_helpers_cannot_inherit_parent_identity(self):
+        self.transcript("parent.jsonl", [self.meta(), self.message("parent")])
+        self.transcript("child.jsonl", [self.meta("child", thread_source="subagent", source={"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}), self.meta(), self.message("child")])
+        rows = self.discovery.list()
+        self.assertEqual([(r["backend"], r["title"]) for r in rows], [("parent", "parent")])
+
+    def test_first_codex_identity_is_not_overwritten_by_copied_metadata(self):
+        self.transcript("fork.jsonl", [self.meta("fork", source="cli"), self.meta("parent"), self.message("fork")])
+        self.assertEqual(self.discovery.list()[0]["backend"], "fork")
+
+    def test_copies_deduplicate_by_identity_not_name(self):
+        self.transcript("older.jsonl", [self.meta("one", title="same title"), self.message("older")])
+        newest = self.transcript("newer.jsonl", [self.meta("one", title="same title"), self.message("newer")])
+        os.utime(newest, (2000000000, 2000000000))
+        self.transcript("different.jsonl", [self.meta("two", title="same title"), self.message("different")])
+        rows = self.discovery.list()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["backend"] for r in rows}, {"one", "two"})
+        self.assertEqual(self.discovery.history(next(r["id"] for r in rows if r["backend"] == "one"))["messages"][0]["text"], "newer")
+
+    def test_helpers_do_not_hide_parent_beyond_first_eighty_files(self):
+        parent = self.transcript("parent.jsonl", [self.meta(), self.message("parent")])
+        os.utime(parent, (1, 1))
+        for index in range(90):
+            self.transcript(f"child-{index}.jsonl", [self.meta(str(index), source={"subagent": "review"}), self.meta()])
+        self.assertEqual([r["backend"] for r in self.discovery.list()], ["parent"])
+
+    def test_claude_helpers_are_not_main_conversations(self):
+        record = {"type": "user", "sessionId": "claude-main", "message": {"content": "question"}}
+        self.transcript("project/main.jsonl", [record], "claude")
+        self.transcript("project/main/subagents/agent-child.jsonl", [record], "claude")
+        self.transcript("project/agent-old.jsonl", [record], "claude")
+        self.transcript("project/sidechain.jsonl", [{**record, "isSidechain": True}], "claude")
+        self.assertEqual(len(self.discovery.list()), 1)
+
+    def test_same_id_on_different_providers_is_not_merged_or_renamed(self):
+        self.transcript("codex.jsonl", [self.meta("shared"), self.message("codex")])
+        self.transcript("project/claude.jsonl", [{"type": "user", "sessionId": "shared", "customTitle": "Claude title", "message": {"content": "claude"}}], "claude")
+        (self.home / ".codex/session_index.jsonl").write_text('{"id":"shared","thread_name":"Codex title"}\n')
+        self.assertEqual({r["provider"]: r["title"] for r in self.discovery.list()}, {"codex": "Codex title", "claude": "Claude title"})
+
+    def test_tool_only_tail_does_not_hide_chat(self):
+        self.transcript("parent.jsonl", [self.meta(), self.message("still visible"),
+                                         {"type": "response_item", "payload": {"type": "function_call_output", "output": "x" * 700000}}])
+        self.assertEqual(self.only_history()["messages"][0]["text"], "still visible")
+
+    def test_oversized_line_does_not_stop_reading_other_messages(self):
+        self.transcript("parent.jsonl", [self.meta(), self.message("before"), {"type": "tool", "text": "x" * (bridge.MAX_FRAME + 5)}, self.message("after")])
+        self.assertEqual([m["text"] for m in self.only_history()["messages"]], ["before", "after"])
+
+    def test_scan_limit_preserves_progress_through_large_records(self):
+        self.transcript("parent.jsonl", [self.meta(), self.message("earlier"), {"type": "tool", "text": "x" * (bridge.MAX_TRANSCRIPT_SCAN + 100)}])
+        latest = self.only_history()
+        self.assertEqual(latest["messages"], [])
+        self.assertGreater(latest["before"], 0)
+        older = self.only_history(latest["before"])
+        self.assertEqual([m["text"] for m in older["messages"]], ["earlier"])
+        self.assertIsNone(older["before"])
+
+    def test_partial_append_is_not_exposed_until_complete(self):
+        path = self.transcript("parent.jsonl", [self.meta(), self.item("first", "complete")])
+        with path.open("ab") as output:
+            output.write(json.dumps(self.item("second", "appending")).encode())
+        self.assertEqual([m["text"] for m in self.only_history()["messages"]], ["complete"])
+        with path.open("ab") as output:
+            output.write(b"\n")
+        self.assertEqual([m["text"] for m in self.only_history()["messages"]], ["complete", "appending"])
+
+    def test_native_pages_are_bounded_stable_and_lossless(self):
+        self.transcript("parent.jsonl", [self.meta()] + [self.item(str(i), f"message {i}") for i in range(230)])
+        cid = self.discovery.list()[0]["id"]
+        pages, cursor = [], None
+        for _ in range(4):
+            page = self.discovery.history(cid, cursor)
+            self.assertLessEqual(len(page["messages"]), 100)
+            pages = page["messages"] + pages
+            if page["before"] is None:
+                break
+            if cursor is not None:
+                self.assertLess(page["before"], cursor)
+            cursor = page["before"]
+        self.assertEqual([m["text"] for m in pages], [f"message {i}" for i in range(230)])
+        self.assertEqual(len({m["id"] for m in pages}), 230)
+
+    def test_malformed_records_do_not_hide_valid_messages(self):
+        self.transcript("parent.jsonl", [self.meta(), [], None, {"type": "event_msg", "payload": []}, self.item("valid", "visible")])
+        self.assertEqual([m["text"] for m in self.only_history()["messages"]], ["visible"])
+
+
 class FakeWorker:
     def __init__(self, owner, cid):
         self.owner, self.cid = owner, cid

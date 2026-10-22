@@ -69,7 +69,8 @@ def main():
                 # Generated test metadata only; never writes a credential into the app bundle.
                 run.write_bytes(plistlib.dumps(config))
                 subprocess.run(["xcodebuild", "test-without-building", "-xctestrun", str(run), "-destination", destination,
-                                "-parallel-testing-enabled", "NO", "-resultBundlePath", str(args.results)]
+                                "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
+                                "-resultBundlePath", str(args.results)]
                                + ["-only-testing:" + item for item in args.only_testing], check=True, timeout=600)
             finally:
                 if process.poll() is None:

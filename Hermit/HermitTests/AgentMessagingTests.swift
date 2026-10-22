@@ -4,6 +4,81 @@ import Crypto
 @testable import Hermit
 
 final class AgentMessagingTests: XCTestCase {
+    @MainActor func testDiscoveryRefreshHidesStaleRowsWithoutDeletingHistoryOrDrafts() async throws {
+        let host = Host(displayName: "Fixture", hostname: "fixture.invalid", username: "fixture")
+        let client = AgentTestTransport(host: host)
+        var includeHelper = true
+        client.onList = { _ in
+            let ids = includeHelper ? ["history:parent", "history:helper"] : ["history:parent"]
+            return .object(["conversations": .array(ids.map { id in .object([
+                "id": .string(id), "title": .string("Same title"), "provider": .string("codex"),
+                "cwd": .string("/fixture"), "status": .string("history"), "writable": .bool(false), "updated": .number(1)
+            ]) })])
+        }
+        let location = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("cache.json")
+        defer { try? FileManager.default.removeItem(at: location.deletingLastPathComponent()) }
+        let store = AgentChatStore(storageURL: location, makeClient: { _ in client })
+        await store.resume(hosts: [host])
+        XCTAssertEqual(store.inboxConversations().count, 2)
+        let helper = try XCTUnwrap(store.conversations.first { $0.conversationID == "history:helper" })
+        store.setDraft("retain this", for: helper)
+        store.favorite(helper)
+        await store.load(helper)
+        includeHelper = false
+        await store.connect(host)
+        XCTAssertEqual(store.inboxConversations().map(\.conversationID), ["history:parent"])
+        XCTAssertEqual(store.inboxConversations(includeCached: true).count, 2)
+        XCTAssertEqual(store.draft(helper), "retain this")
+        XCTAssertEqual(store.history(helper).messages.last?.text, "reply")
+        XCTAssertTrue(store.archive.favorites.contains(helper.id))
+        await store.suspend()
+    }
+
+    @MainActor func testInboxKeepsSameTitlesAndIDsOnDifferentHostsDistinct() async throws {
+        let hosts = [Host(displayName: "Mac", hostname: "mac.invalid", username: "fixture"),
+                     Host(displayName: "Linux", hostname: "linux.invalid", username: "fixture")]
+        let location = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("cache.json")
+        defer { try? FileManager.default.removeItem(at: location.deletingLastPathComponent()) }
+        let store = AgentChatStore(storageURL: location, makeClient: { AgentTestTransport(host: $0) })
+        await store.resume(hosts: hosts)
+        XCTAssertEqual(store.inboxConversations().count, 2)
+        XCTAssertEqual(Set(store.inboxConversations().map(\.id)).count, 2)
+        await store.suspend()
+        XCTAssertEqual(store.inboxConversations().count, 2)
+    }
+
+    func testNativeHistoryClassificationDoesNotDependOnWritableStatus() {
+        let native = AgentConversation(profileID: UUID(), route: "route", bridgeID: "host", conversationID: "history:one", title: "History", provider: "codex", cwd: "/tmp", status: "history", writable: false, updated: 1)
+        var managed = native
+        managed.conversationID = "managed"
+        managed.status = "offline"
+        XCTAssertTrue(native.isNativeHistory)
+        XCTAssertFalse(managed.isNativeHistory)
+    }
+
+    @MainActor func testTokenRefreshDoesNotHideNativeHistory() async throws {
+        let host = Host(displayName: "Fixture", hostname: "fixture.invalid", username: "fixture")
+        let client = AgentTestTransport(host: host)
+        var lightweightLists = 0
+        client.onList = { params in
+            let ids: [String]
+            if params["discover"]?.boolean == false { lightweightLists += 1; ids = [] }
+            else { ids = ["history:parent"] }
+            return .object(["conversations": .array(ids.map { id in .object([
+                "id": .string(id), "title": .string("Parent"), "provider": .string("codex"),
+                "cwd": .string("/fixture"), "status": .string("history"), "writable": .bool(false), "updated": .number(1)
+            ]) })])
+        }
+        let location = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("cache.json")
+        defer { try? FileManager.default.removeItem(at: location.deletingLastPathComponent()) }
+        let store = AgentChatStore(storageURL: location, makeClient: { _ in client })
+        await store.resume(hosts: [host])
+        client.onChange?(nil)
+        try await eventually { lightweightLists > 0 }
+        XCTAssertEqual(store.inboxConversations().map(\.conversationID), ["history:parent"])
+        await store.suspend()
+    }
+
     @MainActor func testOldDisconnectCannotOverwriteReconnectedHosts() async throws {
         let hosts = [Host(displayName: "One", hostname: "one.invalid", username: "fixture"),
                      Host(displayName: "Two", hostname: "two.invalid", username: "fixture")]
@@ -123,6 +198,15 @@ final class AgentMessagingTests: XCTestCase {
             }
             try await client.connect(pins: pins)
             let bridgeID = client.bridgeID
+            let listing = try await client.request("list")
+            let native = listing["conversations"].array.filter { $0["id"].string?.hasPrefix("history:") == true }
+            XCTAssertEqual(native.count, 2, "Helper logs must not appear as separate conversations")
+            for row in native {
+                let history = try await client.request("history", ["conversation": row["id"]])
+                let messages = try history.decode(AgentHistory.self).messages
+                XCTAssertTrue(messages.contains { $0.text == "Native fixture answer" })
+                XCTAssertFalse(row["writable"].boolean)
+            }
             let conversation = UUID().uuidString
             let created = try await client.request("create", ["requestID": .string(conversation), "provider": .string("codex"), "title": .string("SSH fixture"), "cwd": .string(config.cwd)])
             XCTAssertEqual(created["id"].string, conversation)
@@ -148,7 +232,7 @@ final class AgentMessagingTests: XCTestCase {
         #endif
     }
 
-    @MainActor private func exerciseLiveStore(host: Host, key: Curve25519.Signing.PrivateKey, hostKey: String, cwd: String, provider: String) async throws {
+    @MainActor private func exerciseLiveStore(host: Hermit.Host, key: Curve25519.Signing.PrivateKey, hostKey: String, cwd: String, provider: String) async throws {
         let location = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("cache.json")
         defer { try? FileManager.default.removeItem(at: location.deletingLastPathComponent()) }
         let store = AgentChatStore(storageURL: location) { host in
@@ -339,18 +423,20 @@ final class AgentMessagingTests: XCTestCase {
 }
 
 @MainActor private final class AgentTestTransport: AgentBridgeTransport {
-    let host: Host
+    let host: Hermit.Host
     let bridgeID = "isolated-unit-fixture"
     var route: String { AgentBridgeClient.route(for: host) }
     var onChange: ((String?) -> Void)?
     var onDisconnect: ((String) -> Void)?
     var onClose: (() async -> Void)?
     var onHistory: (() async -> AgentJSON)?
-    init(host: Host) { self.host = host }
+    var onList: (([String: AgentJSON]) async -> AgentJSON)?
+    init(host: Hermit.Host) { self.host = host }
     func connect(pins: [String: String]) async throws {}
     func close() async { await onClose?() }
     func request(_ method: String, _ params: [String: AgentJSON]) async throws -> AgentJSON {
         if method == "list" {
+            if let onList { return await onList(params) }
             return .object(["conversations": .array([.object([
                 "id": .string("conversation"), "title": .string("Fixture"), "provider": .string("codex"),
                 "cwd": .string("/tmp/fixture"), "status": .string("ready"), "writable": .bool(true), "updated": .number(1)

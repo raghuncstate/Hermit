@@ -76,6 +76,7 @@ struct AgentConversation: Codable, Identifiable, Hashable {
     var writable: Bool
     var updated: Double
     var id: String { [profileID.uuidString, route, bridgeID, conversationID].joined(separator: "|") }
+    var isNativeHistory: Bool { conversationID.hasPrefix("history:") }
 }
 
 struct AgentMessage: Codable, Identifiable, Equatable {

@@ -44,6 +44,8 @@ struct AgentInboxView: View {
     @State private var showingServers = false
     @State private var showingSettings = false
     @State private var composing = false
+    @State private var showingHistory = false
+    @State private var includeCached = false
 
     private var hosts: [Host] {
         if store.demo {
@@ -53,7 +55,7 @@ struct AgentInboxView: View {
         return dataStore.hosts
     }
     private var visible: [AgentConversation] {
-        store.conversations.filter { c in
+        store.inboxConversations(includeCached: includeCached).filter { c in
             (selectedHost == nil || c.profileID == selectedHost) && (search.isEmpty || c.title.localizedCaseInsensitiveContains(search) || c.cwd.localizedCaseInsensitiveContains(search))
         }
     }
@@ -79,8 +81,22 @@ struct AgentInboxView: View {
                 if !favorites.isEmpty {
                     Section("Starred") { ForEach(favorites) { row($0) } }
                 }
-                Section("Conversations") {
-                    ForEach(visible.filter { !favorites.contains($0) }) { row($0) }
+                let unstarred = visible.filter { !favorites.contains($0) }
+                if unstarred.contains(where: { !$0.isNativeHistory }) {
+                    Section("Conversations") {
+                        ForEach(unstarred.filter { !$0.isNativeHistory }) { row($0) }
+                    }
+                }
+                let histories = unstarred.filter(\.isNativeHistory)
+                if !histories.isEmpty {
+                    Section {
+                        DisclosureGroup(isExpanded: Binding(get: { showingHistory || !search.isEmpty }, set: { showingHistory = $0 })) {
+                            ForEach(histories) { row($0) }
+                        } label: {
+                            Label("Saved history (\(histories.count))", systemImage: "clock")
+                                .accessibilityIdentifier("chat-saved-history")
+                        }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -94,6 +110,7 @@ struct AgentInboxView: View {
                     Menu {
                         Button("All hosts") { selectedHost = nil }
                         ForEach(hosts) { host in Button(host.displayName) { selectedHost = host.id } }
+                        Toggle("Include cached history", isOn: $includeCached)
                         Divider()
                         Button("Connections", systemImage: "server.rack") { showingServers = true }
                         Button("Settings", systemImage: "gearshape") { showingSettings = true }
@@ -249,6 +266,22 @@ struct AgentConversationView: View {
                           canLoadOlder: history.before != nil, loadOlder: { Task { await store.load(conversation, older: true) } },
                           refresh: { Task { await store.load(conversation) } }, openLink: { pendingLink = $0 })
                 .accessibilityIdentifier("chat-timeline")
+                .overlay {
+                    if history.messages.isEmpty {
+                        VStack(spacing: 12) {
+                            if store.loading.contains(conversation.id) {
+                                ProgressView("Loading history")
+                            } else if !store.isConnected(conversation) {
+                                Label("Not connected", systemImage: "wifi.slash")
+                            } else {
+                                Text(history.before == nil ? "No recorded messages" : "No messages in this page")
+                                if history.before != nil {
+                                    Button("Earlier messages", systemImage: "arrow.up") { Task { await store.load(conversation, older: true) } }
+                                }
+                            }
+                        }.font(.callout).foregroundStyle(.secondary).padding()
+                    }
+                }
             if !atBottom || history.hasNewer == true {
                 HStack {
                     Spacer()

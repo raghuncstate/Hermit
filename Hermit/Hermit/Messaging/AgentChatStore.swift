@@ -53,6 +53,9 @@ final class AgentChatStore {
     }
 
     var conversations: [AgentConversation] { archive.conversations.sorted { $0.updated > $1.updated } }
+    func inboxConversations(includeCached: Bool = false) -> [AgentConversation] {
+        conversations.filter { includeCached || $0.status != "cached" }
+    }
     func history(_ conversation: AgentConversation) -> AgentHistory { archive.histories[conversation.id] ?? AgentHistory() }
     func draft(_ conversation: AgentConversation) -> String { archive.drafts[conversation.id] ?? "" }
     func setDraft(_ text: String, for conversation: AgentConversation) {
@@ -445,6 +448,19 @@ final class AgentChatStore {
                 }, status: "history")
             }
             if index < 3 { archive.favorites.append(c.id) }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--agent-chat-history-regression") {
+            for (index, title) in ["Saved Codex conversation", "Empty transcript", "Cached helper"].enumerated() {
+                let c = AgentConversation(profileID: host, route: "fixture", bridgeID: "isolated-fixture", conversationID: "history:demo-\(index)", title: title, provider: "codex", cwd: "/tmp/hermit-ui-fixture", status: index == 2 ? "cached" : "history", writable: false, updated: Double(200 - index))
+                archive.conversations.append(c)
+                archive.histories[c.id] = AgentHistory(messages: index == 0 ? [
+                    AgentMessage(id: "native-question", role: "user", text: "A saved question", status: "complete", seq: 1),
+                    AgentMessage(id: "native-answer", role: "assistant", text: "A readable saved answer", status: "complete", seq: 2)
+                ] : [], status: "history")
+            }
+            for index in 0..<50 {
+                archive.conversations.append(AgentConversation(profileID: host, route: "fixture", bridgeID: "isolated-fixture", conversationID: "history:older-\(index)", title: "Older conversation \(index)", provider: "claude", cwd: "/tmp/hermit-ui-fixture", status: "history", writable: false, updated: Double(50 - index)))
+            }
         }
         #endif
     }

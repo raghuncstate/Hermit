@@ -37,6 +37,12 @@ at user login; Linux follows the existing user-manager lifetime.
 - Native terminal histories are read-only in Messages. Continue existing tmux
   conversations in Terminals; the bridge never sends tmux keystrokes or adopts a
   running terminal process.
+- Saved history is separate from bridge-owned conversations and is not a live
+  tmux inventory. Discovery excludes helper-agent logs and deduplicates exact
+  conversation IDs within a host/provider. Cached rows remain available through
+  the filter without deleting drafts or downloaded messages. Native pages read
+  current/legacy display events with a bounded scan; an empty page with older
+  data offers an Earlier messages action instead of an unexplained blank view.
 - A service or host restart retains history but does not automatically resume
   workers. Prior conversations become read-only and interrupted delivery may be
   unknown. Safe explicit resumption is future work.

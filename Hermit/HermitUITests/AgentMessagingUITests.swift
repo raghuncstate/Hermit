@@ -1,13 +1,33 @@
 import XCTest
 
 final class AgentMessagingUITests: XCTestCase {
-    @MainActor private func launch() -> XCUIApplication {
+    @MainActor private func launch(extraArguments: [String] = []) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--agent-chat-demo", "--agent-chat-reset-test-preferences"]
+        app.launchArguments = ["--agent-chat-demo", "--agent-chat-reset-test-preferences"] + extraArguments
         app.launch()
         XCTAssertTrue(app.buttons["chat-row-demo-0"].waitForExistence(timeout: 15))
         return app
+    }
+    @MainActor func testSavedHistoryIsCollapsedReadableAndEmptyStateIsExplicit() {
+        let app = launch(extraArguments: ["--agent-chat-history-regression"])
+        XCTAssertFalse(app.buttons["chat-row-history:demo-0"].exists)
+        XCTAssertTrue(app.buttons["chat-row-demo-3"].isHittable)
+        screenshot("Collapsed saved history")
+        let histories = app.buttons["chat-saved-history"]
+        XCTAssertTrue(histories.waitForExistence(timeout: 5))
+        histories.tap()
+        screenshot("Expanded saved history")
+        XCTAssertTrue(app.buttons["chat-row-history:demo-0"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["chat-row-history:demo-2"].exists)
+        app.buttons["chat-row-history:demo-0"].tap()
+        XCTAssertTrue(app.textViews["chat-message-native-answer"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textFields["chat-composer"].exists)
+        screenshot("Readable saved history")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["chat-row-history:demo-1"].tap()
+        XCTAssertTrue(app.staticTexts["No recorded messages"].waitForExistence(timeout: 5))
+        screenshot("Empty history state")
     }
     @MainActor func testInboxChatSendHostIsolationAndBack() {
         let app = launch()

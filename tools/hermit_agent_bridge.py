@@ -20,6 +20,7 @@ VERSION = 1
 MAX_FRAME = 1024 * 1024
 MAX_TEXT = 128 * 1024
 MAX_HISTORY = 700 * 1024
+MAX_TRANSCRIPT_SCAN = 8 * 1024 * 1024
 CLAUDE_ACCOUNT_CLEAR_ENV = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
@@ -210,28 +211,48 @@ class Discovery:
                     break
                 if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
                     continue
+                if provider == "claude" and ("subagents" in path.relative_to(root).parts or path.name.startswith("agent-")):
+                    continue
                 try:
                     if path.is_file(): paths.append((path.stat().st_mtime, path))
                 except OSError:
                     continue
             paths.sort(key=lambda item: item[0], reverse=True)
-            for _, path in paths[:80]:
+            seen = set()
+            # Helpers must not consume the whole discovery budget before parent chats.
+            for _, path in paths[:1600]:
                 try:
                     cid = "history:" + hashlib.sha256(str(path).encode()).hexdigest()
                     cwd, title, backend = "", path.stem[-12:], ""
+                    identity_found, helper = False, False
                     with transcript_file(path, root) as source:
                         for _ in range(20):
                             line = source.readline(MAX_FRAME + 1)
                             if not line or len(line) > MAX_FRAME:
                                 break
                             record = json.loads(line)
+                            if not isinstance(record, dict):
+                                continue
                             meta = record.get("payload", {}) if provider == "codex" else record
                             if isinstance(meta, dict):
-                                cwd = meta.get("cwd", cwd)
-                                title = meta.get("title") or meta.get("customTitle") or title
-                                if provider == "codex" and record.get("type") == "session_meta": backend = meta.get("id", "")
-                                elif provider == "claude": backend = record.get("sessionId", backend)
-                        if provider == "claude":
+                                if provider == "codex" and record.get("type") == "session_meta" and not identity_found:
+                                    # Forks can contain the parent's metadata immediately after their own.
+                                    identity_found = True
+                                    origin = meta.get("source")
+                                    helper = meta.get("thread_source") == "subagent" or origin == "subagent" or (isinstance(origin, dict) and "subagent" in origin)
+                                    backend = meta.get("id", "")
+                                    cwd = meta.get("cwd", "")
+                                    title = meta.get("title") or title
+                                elif provider == "claude":
+                                    helper = helper or record.get("isSidechain") is True
+                                    if not identity_found and isinstance(record.get("sessionId"), str):
+                                        backend = record["sessionId"]
+                                        identity_found = True
+                                    cwd = meta.get("cwd", cwd)
+                                    title = meta.get("title") or meta.get("customTitle") or title
+                            if helper:
+                                break
+                        if provider == "claude" and not helper:
                             source.seek(max(0, path.stat().st_size - 65536))
                             if source.tell(): source.readline(MAX_FRAME)
                             for line in source:
@@ -239,10 +260,21 @@ class Discovery:
                                     value = json.loads(line)
                                     if value.get("type") == "custom-title" and isinstance(value.get("customTitle"), str): title = value["customTitle"]
                                 except (ValueError, AttributeError): pass
-                    title = names.get(backend, title)
+                    if helper:
+                        continue
+                    if not isinstance(backend, str):
+                        backend = ""
+                    identity = backend or cid
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    if provider == "codex":
+                        title = names.get(backend, title)
                     new_paths[cid] = (path, root, provider)
                     entries.append({"id": cid, "provider": provider, "title": str(title), "cwd": str(cwd),
                                     "backend": backend, "status": "history", "writable": False, "updated": path.stat().st_mtime})
+                    if len(seen) >= 80:
+                        break
                 except (OSError, ValueError, TypeError, BridgeError):
                     continue
         self.paths = new_paths
@@ -260,41 +292,84 @@ class Discovery:
         with transcript_file(path, root) as source:
             size = os.fstat(source.fileno()).st_size
             end = min(before if before is not None else size, size)
-            start = max(0, end - 512 * 1024)
+            scan_start = start = max(0, end - MAX_TRANSCRIPT_SCAN)
             source.seek(start)
+            data = source.read(end - start)
+            # Discard only an incomplete first line, keeping absolute byte cursors stable.
             if start:
-                source.readline(MAX_FRAME + 1)
-            valid_start = source.tell()
-            while source.tell() < end:
-                offset = source.tell()
-                line = source.readline(MAX_FRAME + 1)
-                if not line or len(line) > MAX_FRAME:
-                    break
+                source.seek(start - 1)
+                if source.read(1) != b"\n":
+                    boundary = data.find(b"\n") + 1
+                    if not boundary:
+                        return {"messages": [], "before": start, "partial": True}
+                    start += boundary
+                    data = data[boundary:]
+            size = 0
+            seen_items = set()
+            limited = False
+            remaining = len(data)
+            while remaining:
+                line_end = remaining
+                remaining = data.rfind(b"\n", 0, line_end - 1) + 1
+                offset = start + remaining
+                if line_end - remaining > MAX_FRAME:
+                    continue
+                line = data[remaining:line_end]
+                if not line.endswith(b"\n"):
+                    continue
                 try:
                     record = json.loads(line)
+                    if not isinstance(record, dict):
+                        continue
                     payload = record.get("payload", {})
-                    role, body = None, None
+                    role, body, item_id = None, None, None
                     if provider == "codex" and record.get("type") == "event_msg":
                         kind = payload.get("type")
                         if kind in ("user_message", "agent_message"):
                             role = "user" if kind == "user_message" else "assistant"
                             body = payload.get("message")
+                        elif kind == "item_completed":
+                            item = payload.get("item", {})
+                            if item.get("type") in ("UserMessage", "AgentMessage"):
+                                role = "user" if item["type"] == "UserMessage" else "assistant"
+                                body = self.content_text(item.get("content", []))
+                                item_id = item.get("id")
                     elif provider == "claude" and record.get("type") in ("user", "assistant"):
                         role = record["type"]
                         content = record.get("message", {}).get("content", [])
-                        body = content if isinstance(content, str) else "\n".join(
-                            x["text"] for x in content if isinstance(x, dict) and x.get("type") == "text" and isinstance(x.get("text"), str))
+                        body = self.content_text(content)
                     if role and isinstance(body, str) and body:
+                        stable_id = f"{cid}:{offset}"
+                        if isinstance(item_id, str) and 0 < len(item_id) <= 200:
+                            if (role, item_id) in seen_items:
+                                continue
+                            seen_items.add((role, item_id))
+                            stable_id = f"{cid}:item:{role}:{item_id}"
                         body, clipped = bounded_output(body)
-                        messages.append({"id": f"{cid}:{offset}", "role": role, "text": body, "status": "truncated" if clipped else "complete", "seq": offset})
+                        message = {"id": stable_id, "role": role, "text": body, "status": "truncated" if clipped else "complete", "seq": offset}
+                        size += len(frame(message))
+                        if messages and (size > MAX_HISTORY or len(messages) >= 100):
+                            limited = True
+                            break
+                        messages.append(message)
                 except (ValueError, TypeError, AttributeError):
                     continue
-        trimmed = False
-        while messages and len(json.dumps(messages, ensure_ascii=False).encode()) > MAX_HISTORY:
-            messages.pop(0)
-            trimmed = True
-        cursor = messages[0]["seq"] if trimmed and messages else valid_start if start else None
+        messages.reverse()
+        cursor = None
+        if limited:
+            cursor = messages[0]["seq"]
+        elif scan_start:
+            cursor = start if start < end else scan_start
         return {"messages": messages, "before": cursor, "partial": True}
+
+    @staticmethod
+    def content_text(content):
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        return "\n".join(x["text"] for x in content if isinstance(x, dict)
+                         and x.get("type") in ("text", "Text") and isinstance(x.get("text"), str))
 
 
 class CodexWorker:
