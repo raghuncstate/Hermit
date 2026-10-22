@@ -115,7 +115,7 @@ struct TmuxProtocolParser {
     }
 
     private func parseEvent(_ line: String) -> TmuxControlEvent? {
-        if line == "%exit" {
+        if line == "%exit" || line.hasPrefix("%exit ") {
             return .exit
         }
 

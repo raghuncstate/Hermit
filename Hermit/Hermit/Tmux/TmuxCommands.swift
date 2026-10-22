@@ -7,8 +7,13 @@ enum TmuxCommandQuoter {
 }
 
 enum TmuxLaunchCommand {
+    // tmux can wait forever for queued control output after SSH closes its pipe.
+    // Keep a reader alive to drain that output after the forwarding cat sees EPIPE.
+    // Arguments stay in "$@"; no host, socket or session text is evaluated as code.
+    static let controlDrainScript = #""$@" | { trap '' PIPE; /bin/cat 2>/dev/null || /bin/cat >/dev/null; }"#
+
     static func controlMode(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {
-        "\(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) -CC new-session -A -f ignore-size -s \(TmuxCommandQuoter.quote(sessionName))"
+        "exec /bin/sh -c \(TmuxCommandQuoter.quote(controlDrainScript)) hermit-control \(tmuxInvocation(socketName: socketName, tmuxCommand: tmuxCommand)) -C new-session -A -f ignore-size -s \(TmuxCommandQuoter.quote(sessionName))"
     }
 
     static func interactive(sessionName: String, socketName: String?, tmuxCommand: String? = nil) -> String {

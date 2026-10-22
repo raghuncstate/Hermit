@@ -104,6 +104,21 @@ final class TmuxWorkspaceModel {
         self.makeClient = makeClient
     }
 
+    isolated deinit {
+        // Navigation can release the last owner without a scene-phase callback.
+        // Capture only old resources; this task must never find a replacement.
+        connectionTask?.cancel()
+        eventTask?.cancel()
+        outputCaptureTasks.values.forEach { $0.cancel() }
+        livePollTasks.values.forEach { $0.cancel() }
+        let oldClient = client
+        let closing = closingTask
+        Task {
+            await closing?.value
+            await oldClient?.disconnect()
+        }
+    }
+
     func connectIfNeeded() async {
         guard !isSuspended, !Task.isCancelled else { return }
         if let connectionTask {

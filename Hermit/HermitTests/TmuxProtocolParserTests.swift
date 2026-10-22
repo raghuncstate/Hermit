@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-#if SWIFT_PACKAGE
+#if canImport(HermitCore)
 @testable import HermitCore
 #else
 @testable import Hermit
@@ -96,7 +96,7 @@ final class TmuxProtocolParserTests: XCTestCase {
     func testLaunchCommandUsesDedicatedSocketWhenConfigured() {
         XCTAssertEqual(
             TmuxLaunchCommand.controlMode(sessionName: "hermit-mobile", socketName: "hermit-mobile"),
-            "tmux -L 'hermit-mobile' -CC new-session -A -f ignore-size -s 'hermit-mobile'"
+            "exec /bin/sh -c \(TmuxCommandQuoter.quote(TmuxLaunchCommand.controlDrainScript)) hermit-control tmux -L 'hermit-mobile' -C new-session -A -f ignore-size -s 'hermit-mobile'"
         )
         XCTAssertEqual(
             TmuxLaunchCommand.interactive(sessionName: "0", socketName: nil),
@@ -121,5 +121,12 @@ final class TmuxProtocolParserTests: XCTestCase {
         XCTAssertEqual(second, [
             .event(.output(paneId: "%12", bytes: Data("hello world\n".utf8)))
         ])
+    }
+
+    func testParsesExitWithReason() {
+        var parser = TmuxProtocolParser()
+        XCTAssertEqual(parser.append(Data("%exit detached\n".utf8)), [.event(.exit)])
+        XCTAssertEqual(parser.append(Data("%exit server exited\n".utf8)), [.event(.exit)])
+        XCTAssertEqual(parser.append(Data("%exit\n".utf8)), [.event(.exit)])
     }
 }

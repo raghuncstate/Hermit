@@ -7,6 +7,12 @@ import os
 private let tmuxLogger = Logger(subsystem: "com.zeromissionllc.hermit", category: "TmuxControl")
 
 actor TmuxControlClient: TmuxCommandClient {
+    struct Timeouts {
+        var startup: Duration = .seconds(15)
+        var command: Duration = .seconds(8)
+        var detach: Duration = .milliseconds(750)
+    }
+
     nonisolated let events: AsyncStream<TmuxControlEvent>
 
     private let eventContinuation: AsyncStream<TmuxControlEvent>.Continuation
@@ -22,9 +28,15 @@ actor TmuxControlClient: TmuxCommandClient {
     private var commandTimeoutTask: Task<Void, Never>?
     private var writeTask: Task<Void, Never>?
     private var didFinish = false
+    private let timeouts: Timeouts
+    private var shutdownTask: Task<Void, Never>?
+    private var exitWaiter: CheckedContinuation<Void, Never>?
+    private var didExit = false
+    private(set) var receivedExitAcknowledgement = false
 
-    init(connection: SSHClientConnection) {
+    init(connection: SSHClientConnection, timeouts: Timeouts = Timeouts()) {
         self.connection = connection
+        self.timeouts = timeouts
         let stream = AsyncStream<TmuxControlEvent>.makeStream(bufferingPolicy: .bufferingNewest(512))
         self.events = stream.stream
         self.eventContinuation = stream.continuation
@@ -43,56 +55,50 @@ actor TmuxControlClient: TmuxCommandClient {
     }
 
     func start(sessionName: String, socketName: String?, tmuxCommand: String?) async throws {
+        try Task.checkCancellation()
+        guard !didFinish else { throw TmuxProtocolError.disconnected }
         guard lifecycleTask == nil else { return }
 
         let command = TmuxLaunchCommand.controlMode(sessionName: sessionName, socketName: socketName, tmuxCommand: tmuxCommand)
-        try await withCheckedThrowingContinuation { continuation in
-            startContinuation = continuation
-            startupTimeoutTask = Task {
-                do {
-                    try await Task.sleep(for: .seconds(15))
-                } catch {
-                    return
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                startContinuation = continuation
+                startupTimeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: timeouts.startup)
+                    } catch {
+                        return
+                    }
+                    guard startContinuation != nil else { return }
+                    beginShutdown(error: TmuxProtocolError.startupTimedOut)
                 }
-                guard startContinuation != nil else { return }
-                finish(error: TmuxProtocolError.startupTimedOut)
-            }
-            lifecycleTask = Task { [sshClient] in
-                do {
-                    try await sshClient.withPTY(
-                        .init(
-                            wantReply: true,
-                            term: "xterm-256color",
-                            terminalCharacterWidth: 80,
-                            terminalRowHeight: 24,
-                            terminalPixelWidth: 0,
-                            terminalPixelHeight: 0,
-                            terminalModes: .init([:])
-                        )
-                    ) { inbound, outbound in
-                        var commandBuffer = ByteBufferAllocator().buffer(capacity: command.utf8.count + 1)
-                        commandBuffer.writeString(command)
-                        commandBuffer.writeString("\n")
-                        try await outbound.write(commandBuffer)
-                        self.setWriter(outbound)
-
-                        for try await output in inbound {
-                            switch output {
-                            case .stdout(var buffer), .stderr(var buffer):
-                                let data = Data(buffer.readBytes(length: buffer.readableBytes) ?? [])
-                                self.receive(data)
+                lifecycleTask = Task { [sshClient] in
+                    do {
+                        try await sshClient.withExec(command) { inbound, outbound in
+                            guard !self.didFinish else { return }
+                            self.writer = outbound
+                            for try await output in inbound {
+                                switch output {
+                                case .stdout(var buffer), .stderr(var buffer):
+                                    let data = Data(buffer.readBytes(length: buffer.readableBytes) ?? [])
+                                    self.receive(data)
+                                }
                             }
                         }
+                        self.transportEnded(error: TmuxProtocolError.disconnected)
+                    } catch {
+                        self.transportEnded(error: error)
                     }
-                    self.finish(error: TmuxProtocolError.disconnected)
-                } catch {
-                    self.finish(error: error)
                 }
             }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.disconnect() }
         }
     }
 
     func send(_ command: String) async throws -> String {
+        try Task.checkCancellation()
         guard !didFinish, let writer else {
             throw TmuxProtocolError.disconnected
         }
@@ -110,22 +116,21 @@ actor TmuxControlClient: TmuxCommandClient {
                     buffer.writeString("\n")
                     try await writer.write(buffer)
                 } catch {
-                    finish(error: error)
-                    await connection.close()
+                    beginShutdown(error: error)
                 }
             }
         }
     }
 
     func disconnect() async {
-        lifecycleTask?.cancel()
-        lifecycleTask = nil
-        finish(error: TmuxProtocolError.disconnected)
-        await connection.close()
+        await beginShutdown(error: TmuxProtocolError.disconnected).value
     }
 
-    private func setWriter(_ writer: TTYStdinWriter) {
-        self.writer = writer
+    private func transportEnded(error: Error) {
+        didExit = true
+        exitWaiter?.resume()
+        exitWaiter = nil
+        beginShutdown(error: error)
     }
 
     private func receive(_ data: Data) {
@@ -135,6 +140,13 @@ actor TmuxControlClient: TmuxCommandClient {
     }
 
     private func handle(_ message: TmuxProtocolMessage) {
+        if case .event(.exit) = message {
+            receivedExitAcknowledgement = true
+            didExit = true
+            exitWaiter?.resume()
+            exitWaiter = nil
+        }
+        guard !didFinish else { return }
         switch message {
         case .commandStarted(let commandNumber):
             guard !waitingForBegin.isEmpty else { return }
@@ -147,6 +159,7 @@ actor TmuxControlClient: TmuxCommandClient {
                 startupTimeoutTask = nil
                 if block.isError {
                     continuation.resume(throwing: TmuxProtocolError.commandFailed(block.output))
+                    beginShutdown(error: TmuxProtocolError.commandFailed(block.output))
                 } else {
                     continuation.resume()
                     Task {
@@ -171,7 +184,7 @@ actor TmuxControlClient: TmuxCommandClient {
         case .event(let event):
             eventContinuation.yield(event)
             if event == .exit {
-                finish(error: TmuxProtocolError.disconnected)
+                beginShutdown(error: TmuxProtocolError.disconnected)
             }
         }
     }
@@ -181,23 +194,21 @@ actor TmuxControlClient: TmuxCommandClient {
         commandTimeoutTask = nil
         guard !waitingForBegin.isEmpty || !pendingCommands.isEmpty else { return }
         commandTimeoutTask = Task {
-            do { try await Task.sleep(for: .seconds(8)) } catch { return }
-            finish(error: TmuxProtocolError.commandTimedOut)
-            await connection.close()
+            do { try await Task.sleep(for: timeouts.command) } catch { return }
+            beginShutdown(error: TmuxProtocolError.commandTimedOut)
         }
     }
 
-    private func finish(error: Error) {
-        guard !didFinish else { return }
+    @discardableResult
+    private func beginShutdown(error: Error) -> Task<Void, Never> {
+        if let shutdownTask { return shutdownTask }
         didFinish = true
         startupTimeoutTask?.cancel()
         startupTimeoutTask = nil
         commandTimeoutTask?.cancel()
         commandTimeoutTask = nil
-        writeTask?.cancel()
+        let lastWrite = writeTask
         writeTask = nil
-
-        writer = nil
         startContinuation?.resume(throwing: error)
         startContinuation = nil
 
@@ -211,5 +222,47 @@ actor TmuxControlClient: TmuxCommandClient {
         }
         pendingCommands.removeAll()
         eventContinuation.finish()
+
+        // Every exit path owns this same teardown. Keep reading until the detach
+        // acknowledgement or deadline; never target another client/session/PID.
+        let task = Task {
+            if let writer, !didExit {
+                var detachWrite: Task<Void, Never>?
+                var deadline: Task<Void, Never>?
+                await withCheckedContinuation { continuation in
+                    exitWaiter = continuation
+                    deadline = Task {
+                        do { try await Task.sleep(for: timeouts.detach) } catch { return }
+                        endDetachWait()
+                    }
+                    detachWrite = Task {
+                        await lastWrite?.value
+                        guard !Task.isCancelled, !didExit else { return }
+                        do {
+                            // An empty control line detaches only this client.
+                            try await writer.write(ByteBuffer(string: "\n"))
+                        } catch {
+                            endDetachWait()
+                        }
+                    }
+                }
+                deadline?.cancel()
+                detachWrite?.cancel()
+            }
+            await connection.close()
+            lifecycleTask?.cancel()
+            lastWrite?.cancel()
+            writer = nil
+            // Do not await this task from the reader itself (transportEnded).
+            await lifecycleTask?.value
+            lifecycleTask = nil
+        }
+        shutdownTask = task
+        return task
+    }
+
+    private func endDetachWait() {
+        exitWaiter?.resume()
+        exitWaiter = nil
     }
 }

@@ -325,6 +325,7 @@ final class SSHConnectionManager {
     }
 
     static func connectClient(for host: Host) async throws -> SSHClientConnection {
+        try Task.checkCancellation()
         let authMethod = try authenticationMethod(for: host)
         logger.info("Auth method built successfully")
 
@@ -337,8 +338,7 @@ final class SSHConnectionManager {
 
         guard let jumpHost = host.jumpHost else {
             let sshClient = try await SSHClient.connect(to: targetSettings)
-            let localForwarders = try await startLocalPortForwards(host.localPortForwards, using: sshClient)
-            return SSHClientConnection(client: sshClient, jumpClient: nil, localPortForwarders: localForwarders)
+            return try await finishConnectionSetup(client: sshClient, jumpClient: nil, forwards: host.localPortForwards)
         }
 
         logger.info("Connecting through jump host \(jumpHost.hostname):\(jumpHost.port) as \(jumpHost.username)")
@@ -352,12 +352,25 @@ final class SSHConnectionManager {
         )
         let jumpClient = try await SSHClient.connect(to: jumpSettings)
 
+        let targetClient: SSHClient
         do {
-            let targetClient = try await jumpClient.jump(to: targetSettings)
-            let localForwarders = try await startLocalPortForwards(host.localPortForwards, using: targetClient)
-            return SSHClientConnection(client: targetClient, jumpClient: jumpClient, localPortForwarders: localForwarders)
+            try Task.checkCancellation()
+            targetClient = try await jumpClient.jump(to: targetSettings)
         } catch {
             try? await jumpClient.close()
+            throw error
+        }
+        return try await finishConnectionSetup(client: targetClient, jumpClient: jumpClient, forwards: host.localPortForwards)
+    }
+
+    // Takes ownership of both authenticated transports, including setup rollback.
+    static func finishConnectionSetup(client: SSHClient, jumpClient: SSHClient?, forwards: [LocalPortForward]) async throws -> SSHClientConnection {
+        do {
+            let localForwarders = try await startLocalPortForwards(forwards, using: client)
+            return SSHClientConnection(client: client, jumpClient: jumpClient, localPortForwarders: localForwarders)
+        } catch {
+            try? await client.close()
+            try? await jumpClient?.close()
             throw error
         }
     }
@@ -384,10 +397,12 @@ final class SSHConnectionManager {
     ) async throws -> [LocalPortForwarder] {
         var started: [LocalPortForwarder] = []
         do {
+            try Task.checkCancellation()
             for portForward in forwards {
                 let forwarder = LocalPortForwarder(forward: portForward)
                 try await forwarder.start(using: sshClient)
                 started.append(forwarder)
+                try Task.checkCancellation()
             }
             return started
         } catch {

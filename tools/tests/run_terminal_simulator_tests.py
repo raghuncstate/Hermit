@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
+from control_fixture_relay import control_argv
 
 
 def main():
@@ -47,11 +48,11 @@ def main():
         with socket.socket() as available:
             available.bind(("127.0.0.1", 0))
             port = available.getsockname()[1]
-        # The forced shell consumes the app's launch line but only attaches this
-        # fixture. It cannot select the default socket or a user's live session.
+        # Accept exec or the legacy shell launch, but attach only this fixture.
+        # Neither can select the default socket or a user's live session.
         wrapper = root / "shell.sh"
-        wrapper.write_text("#!/bin/sh\nIFS= read -r requested || exit 1\nexec " + shlex.join(
-            owned_tmux + ["-CC", "new-session", "-A", "-f", "ignore-size", "-s", "foreground"]) + "\n")
+        wrapper.write_text("#!/bin/sh\nif [ -z \"$SSH_ORIGINAL_COMMAND\" ]; then IFS= read -r requested || exit 1; fi\nexec " + shlex.join(
+            control_argv(tmux, socket_name, "foreground")) + "\n")
         config = root / "sshd_config"
         config.write_text("\n".join([
             "Port " + str(port), "ListenAddress 127.0.0.1", "HostKey " + str(root / "host"),
